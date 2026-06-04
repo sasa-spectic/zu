@@ -163,10 +163,10 @@ const getHtmlPage = () => `
         </div>
 
         <div class="footer">
-            <a href="https://t.me/teriakvpn" target="_blank" title="کانال تلگرام">
+            <a href="https://t.me/YourChannel" target="_blank" title="کانال تلگرام">
                 <svg viewBox="0 0 24 24"><path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm4.64 6.8c-.15 1.58-.8 5.42-1.13 7.19-.14.75-.42 1-.68 1.03-.58.05-1.02-.38-1.58-.75-.88-.58-1.38-.94-2.23-1.5-.99-.65-.35-1.01.22-1.59.15-.15 2.71-2.48 2.76-2.69.01-.03.01-.14-.07-.19-.08-.05-.19-.02-.27 0-.12.03-1.96 1.25-5.54 3.67-.52.36-1 .53-1.42.52-.47-.01-1.37-.26-2.03-.48-.82-.27-1.47-.42-1.42-.88.03-.24.29-.48.79-.74 3.08-1.34 5.14-2.23 6.17-2.67 2.93-1.24 3.54-1.45 3.94-1.46.09 0 .28.02.39.11.09.08.13.19.14.3z"/></svg>
             </a>
-            <a href="http://github.com/AG-Morgan/Teriak-Panel" target="_blank" title="گیت‌هاب">
+            <a href="https://github.com/YourGithub" target="_blank" title="گیت‌هاب">
                 <svg viewBox="0 0 24 24"><path d="M12 2C6.477 2 2 6.477 2 12c0 4.42 2.865 8.166 6.839 9.489.5.092.682-.217.682-.482 0-.237-.008-.866-.013-1.7-2.782.603-3.369-1.34-3.369-1.34-.454-1.156-1.11-1.462-1.11-1.462-.908-.62.069-.608.069-.608 1.003.07 1.531 1.03 1.531 1.03.892 1.529 2.341 1.087 2.91.831.092-.646.35-1.086.636-1.336-2.22-.253-4.555-1.11-4.555-4.943 0-1.091.39-1.984 1.029-2.683-.103-.253-.446-1.27.098-2.647 0 0 .84-.269 2.75 1.025A9.578 9.578 0 0112 6.836c.85.004 1.705.114 2.504.336 1.909-1.294 2.747-1.025 2.747-1.025.546 1.377.203 2.394.1 2.647.64.699 1.028 1.592 1.028 2.683 0 3.842-2.339 4.687-4.566 4.935.359.309.678.919.678 1.852 0 1.336-.012 2.415-.012 2.743 0 .267.18.578.688.48C19.138 20.161 22 16.416 22 12c0-5.523-4.477-10-10-10z"/></svg>
             </a>
         </div>
@@ -237,7 +237,7 @@ const getHtmlPage = () => `
             const vlessLink = \`vless://\${data.uuid}@\${data.clean_ip}:\${data.port}?path=\${encodeURIComponent(data.path)}&security=tls&encryption=none&insecure=0&host=\${host}&fp=chrome&type=ws&allowInsecure=0&sni=\${host}#\${data.name}\`;
             document.getElementById('vlessOutput').textContent = vlessLink;
 
-            // 2. تولید فایل JSON (Xray)
+            // 2. تولید فایل JSON (Xray) بدون قانون geosite:ir
             const jsonConfig = {
                 "remarks": data.name,
                 "log": { "loglevel": "warning" },
@@ -298,7 +298,6 @@ const getHtmlPage = () => `
                 "routing": {
                     "domainStrategy": "IPIfNonMatch",
                     "rules": [
-                        { "type": "field", "outboundTag": "direct", "domain": ["geosite:ir"] },
                         { "type": "field", "outboundTag": "block", "domain": ["geosite:category-ads-all"] },
                         { "type": "field", "outboundTag": "proxy", "network": "tcp,udp" }
                     ]
@@ -328,14 +327,12 @@ const getHtmlPage = () => `
 // 3. CORE PROXY (VLESS) & PROXY-IP BYPASS
 // ==========================================
 
-// دقيقا كد اوليه شما
 function extractUUIDFromVless(data) {
     if (data.byteLength < 17) return null;
     const hex = [...data.slice(1, 17)].map(b => b.toString(16).padStart(2, '0')).join('');
     return `${hex.substring(0, 8)}-${hex.substring(8, 12)}-${hex.substring(12, 16)}-${hex.substring(16, 20)}-${hex.substring(20)}`;
 }
 
-// دقيقا كد اوليه شما
 async function connectTCP(addr, port, proxyIP) {
     try {
         const socket = connect({ hostname: addr, port });
@@ -351,7 +348,6 @@ async function connectTCP(addr, port, proxyIP) {
     }
 }
 
-// دقيقا كد اوليه شما با جايگزين كردن KV به جاي DB
 async function handleVLESS(request, env) {
     const WS套接字对 = new WebSocketPair();
     const [clientSock, serverSock] = Object.values(WS套接字对);
@@ -363,7 +359,6 @@ async function handleVLESS(request, env) {
     let isHeaderParsed = false;
     let chunkBuffer = new Uint8Array(0);
 
-    // واکشی تنظیمات از KV برای اتصال پروکسی
     let storedData = await env.TERIAK_KV.get("settings", "json");
     if (!storedData) storedData = DEFAULT_SETTINGS;
     
@@ -383,7 +378,6 @@ async function handleVLESS(request, env) {
                 return;
             }
 
-            // فقط UUID ثبت شده در پنل اجازه اتصال دارد
             if (reqUUID !== validUUID) {
                 serverSock.close(); 
                 return;
@@ -455,12 +449,10 @@ export default {
         const url = new URL(request.url);
         const upgradeHeader = (request.headers.get('Upgrade') || '').toLowerCase();
         
-        // مسیر پروکسی VLESS
         if (upgradeHeader === 'websocket') {
             return handleVLESS(request, env);
         }
 
-        // مسیر رابط کاربری پنل
         if (url.pathname === '/panel') {
             return new Response(getHtmlPage(), {
                 status: 200,
@@ -468,13 +460,12 @@ export default {
             });
         }
         
-        // مسیر API برای خواندن و نوشتن اطلاعات از KV
         if (url.pathname === '/panel/api') {
             if (request.method === 'GET') {
                 let data = await env.TERIAK_KV.get("settings", "json");
                 if (!data) {
                     data = DEFAULT_SETTINGS;
-                    data.uuid = crypto.randomUUID(); // ساخت اتوماتیک اولین UUID
+                    data.uuid = crypto.randomUUID(); 
                     await env.TERIAK_KV.put("settings", JSON.stringify(data));
                 }
                 return new Response(JSON.stringify(data), { headers: { 'Content-Type': 'application/json' } });
@@ -487,7 +478,6 @@ export default {
             }
         }
 
-        // مسیر اصلی وب‌سایت (نمایش Nginx برای گمراه کردن سیستم‌های فیلترینگ)
         return new Response(`<!DOCTYPE html><html><head><title>Welcome to nginx!</title><style>body {width: 35em;margin: 0 auto;font-family: Tahoma, Verdana, Arial, sans-serif;}</style></head><body><h1>Welcome to nginx!</h1><p>If you see this page, the nginx web server is successfully installed and working.</p></body></html>`, {
             status: 200,
             headers: { 'Content-Type': 'text/html; charset=UTF-8' }
