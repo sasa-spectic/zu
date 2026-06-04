@@ -1,4 +1,5 @@
 <div dir="rtl" align="right">
+<img width="1400" height="844" alt="image" src="https://github.com/user-attachments/assets/1373f13e-682c-40ad-8099-8fb3b62cc368" />
 
 # 🚀 تریاک پنل (Teriak Panel) - VLESS Proxy on Cloudflare
 
