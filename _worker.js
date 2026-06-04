@@ -237,71 +237,220 @@ const getHtmlPage = () => `
             const vlessLink = \`vless://\${data.uuid}@\${data.clean_ip}:\${data.port}?path=\${encodeURIComponent(data.path)}&security=tls&encryption=none&insecure=0&host=\${host}&fp=chrome&type=ws&allowInsecure=0&sni=\${host}#\${data.name}\`;
             document.getElementById('vlessOutput').textContent = vlessLink;
 
-            // 2. تولید فایل JSON (Xray) بدون قانون geosite:ir
+            // 2. تولید فرمت جدید و دقیق JSON بر اساس تمپلیت دریافتی
             const jsonConfig = {
                 "remarks": data.name,
-                "log": { "loglevel": "warning" },
+                "version": {
+                    "min": "25.10.15"
+                },
+                "log": {
+                    "loglevel": "none"
+                },
+                "dns": {
+                    "servers": [
+                        {
+                            "address": "https://8.8.8.8/dns-query",
+                            "tag": "remote-dns"
+                        },
+                        {
+                            "address": "8.8.8.8",
+                            "domains": [
+                                "full:" + host
+                            ],
+                            "skipFallback": true
+                        }
+                    ],
+                    "queryStrategy": "UseIP",
+                    "tag": "dns"
+                },
                 "inbounds": [
                     {
-                        "port": 10808,
                         "listen": "127.0.0.1",
+                        "port": 10808,
                         "protocol": "socks",
-                        "settings": { "auth": "noauth", "udp": true },
-                        "sniffing": { "enabled": true, "destOverride": ["http", "tls"] }
+                        "settings": {
+                            "auth": "noauth",
+                            "udp": true
+                        },
+                        "sniffing": {
+                            "destOverride": [
+                                "http",
+                                "tls"
+                            ],
+                            "enabled": true,
+                            "routeOnly": true
+                        },
+                        "tag": "mixed-in"
+                    },
+                    {
+                        "listen": "127.0.0.1",
+                        "port": 10853,
+                        "protocol": "dokodemo-door",
+                        "settings": {
+                            "address": "1.1.1.1",
+                            "network": "tcp,udp",
+                            "port": 53
+                        },
+                        "tag": "dns-in"
                     }
                 ],
                 "outbounds": [
                     {
-                        "tag": "proxy",
                         "protocol": "vless",
                         "settings": {
-                            "vnext": [{
-                                "address": data.clean_ip,
-                                "port": parseInt(data.port),
-                                "users": [{ "id": data.uuid, "encryption": "none" }]
-                            }]
+                            "vnext": [
+                                {
+                                    "address": data.clean_ip,
+                                    "port": parseInt(data.port),
+                                    "users": [
+                                        {
+                                            "id": data.uuid,
+                                            "encryption": "none"
+                                        }
+                                    ]
+                                }
+                            ]
                         },
                         "streamSettings": {
                             "network": "ws",
+                            "wsSettings": {
+                                "host": host,
+                                "path": data.path
+                            },
                             "security": "tls",
                             "tlsSettings": {
                                 "serverName": host,
-                                "allowInsecure": false,
-                                "fingerprint": "chrome"
-                            },
-                            "wsSettings": {
-                                "path": data.path,
-                                "headers": { "Host": host }
+                                "fingerprint": "chrome",
+                                "alpn": [
+                                    "http/1.1"
+                                ],
+                                "allowInsecure": false
                             },
                             "sockopt": {
-                                "dialerProxy": "fragment",
-                                "tcpNoDelay": true
+                                "dialerProxy": "fragment"
                             }
-                        }
+                        },
+                        "tag": "proxy"
                     },
                     {
-                        "tag": "fragment",
                         "protocol": "freedom",
                         "settings": {
-                            "domainStrategy": "AsIs",
                             "fragment": {
                                 "packets": "tlshello",
                                 "length": data.frag_length,
                                 "interval": data.frag_interval
                             }
                         },
-                        "streamSettings": { "sockopt": { "tcpNoDelay": true } }
+                        "streamSettings": {
+                            "sockopt": {
+                                "domainStrategy": "UseIP",
+                                "happyEyeballs": {
+                                    "tryDelayMs": 250,
+                                    "prioritizeIPv6": false,
+                                    "interleave": 2,
+                                    "maxConcurrentTry": 4
+                                }
+                            }
+                        },
+                        "tag": "fragment"
                     },
-                    { "protocol": "freedom", "tag": "direct" },
-                    { "protocol": "blackhole", "tag": "block" }
+                    {
+                        "protocol": "dns",
+                        "settings": {
+                            "nonIPQuery": "reject"
+                        },
+                        "tag": "dns-out"
+                    },
+                    {
+                        "protocol": "freedom",
+                        "settings": {
+                            "domainStrategy": "UseIP"
+                        },
+                        "tag": "direct"
+                    },
+                    {
+                        "protocol": "blackhole",
+                        "settings": {
+                            "response": {
+                                "type": "http"
+                            }
+                        },
+                        "tag": "block"
+                    }
                 ],
                 "routing": {
                     "domainStrategy": "IPIfNonMatch",
                     "rules": [
-                        { "type": "field", "outboundTag": "block", "domain": ["geosite:category-ads-all"] },
-                        { "type": "field", "outboundTag": "proxy", "network": "tcp,udp" }
+                        {
+                            "inboundTag": [
+                                "mixed-in"
+                            ],
+                            "port": 53,
+                            "outboundTag": "dns-out",
+                            "type": "field"
+                        },
+                        {
+                            "inboundTag": [
+                                "dns-in"
+                            ],
+                            "outboundTag": "dns-out",
+                            "type": "field"
+                        },
+                        {
+                            "inboundTag": [
+                                "remote-dns"
+                            ],
+                            "outboundTag": "proxy",
+                            "type": "field"
+                        },
+                        {
+                            "inboundTag": [
+                                "dns"
+                            ],
+                            "outboundTag": "direct",
+                            "type": "field"
+                        },
+                        {
+                            "domain": [
+                                "geosite:private"
+                            ],
+                            "outboundTag": "direct",
+                            "type": "field"
+                        },
+                        {
+                            "ip": [
+                                "geoip:private"
+                            ],
+                            "outboundTag": "direct",
+                            "type": "field"
+                        },
+                        {
+                            "network": "udp",
+                            "outboundTag": "block",
+                            "type": "field"
+                        },
+                        {
+                            "network": "tcp",
+                            "outboundTag": "proxy",
+                            "type": "field"
+                        }
                     ]
-                }
+                },
+                "policy": {
+                    "levels": {
+                        "0": {
+                            "connIdle": 300,
+                            "handshake": 4,
+                            "uplinkOnly": 1,
+                            "downlinkOnly": 1
+                        }
+                    },
+                    "system": {
+                        "statsOutboundUplink": true,
+                        "statsOutboundDownlink": true
+                    }
+                },
+                "stats": {}
             };
 
             document.getElementById('jsonOutput').textContent = JSON.stringify(jsonConfig, null, 2);
