@@ -259,11 +259,14 @@ const getHtmlPage = () => `
         }
         .footer svg { width: 18px; height: 18px; fill: currentColor; }
         
-        .blur-bg {
+                .blur-bg {
             opacity: 0.15;
             pointer-events: none;
             user-select: none;
             transition: opacity 0.3s ease;
+        }
+        body.no-scroll {
+            overflow: hidden;
         }
         .modal-overlay {
             position: fixed;
@@ -493,9 +496,10 @@ const getHtmlPage = () => `
                 const statusRes = await fetch('/panel/status');
                 const statusData = await statusRes.json();
                 
-                if (!statusData.hasPassword) {
+                                if (!statusData.hasPassword) {
                     document.querySelector('.container').classList.add('blur-bg');
                     document.getElementById('authModal').style.display = 'flex';
+                    document.body.classList.add('no-scroll');
                     document.getElementById('modalTitle').textContent = 'تعیین رمز عبور';
                     document.getElementById('modalDesc').textContent = 'برای اولین ورود، لطفا رمز عبور پنل خود را تعیین کنید.';
                     document.getElementById('pwdConfirmGroup').style.display = 'block';
@@ -513,10 +517,11 @@ const getHtmlPage = () => `
                             headers: { 'Content-Type': 'application/json' },
                             body: JSON.stringify({ password: pwd })
                         });
-                        if (res.ok) {
+                                                if (res.ok) {
                             sessionStorage.setItem('panel_password', pwd);
                             document.querySelector('.container').classList.remove('blur-bg');
                             document.getElementById('authModal').style.display = 'none';
+                            document.body.classList.remove('no-scroll');
                             loadSettings();
                         } else {
                             alert('خطا در ثبت رمز عبور');
@@ -535,9 +540,10 @@ const getHtmlPage = () => `
             }
         }
 
-        function showLoginModal() {
+                function showLoginModal() {
             document.querySelector('.container').classList.add('blur-bg');
             document.getElementById('authModal').style.display = 'flex';
+            document.body.classList.add('no-scroll');
             document.getElementById('modalTitle').textContent = 'ورود به پنل مدیریت';
             document.getElementById('modalDesc').textContent = 'لطفا رمز عبور خود را وارد کنید.';
             document.getElementById('pwdConfirmGroup').style.display = 'none';
@@ -551,10 +557,11 @@ const getHtmlPage = () => `
                     headers: { 'X-Panel-Password': pwd }
                 });
                 
-                if (res.status === 200) {
+                                if (res.status === 200) {
                     sessionStorage.setItem('panel_password', pwd);
                     document.querySelector('.container').classList.remove('blur-bg');
                     document.getElementById('authModal').style.display = 'none';
+                    document.body.classList.remove('no-scroll');
                     const data = await res.json();
                     document.getElementById('name').value = data.name;
                     document.getElementById('clean_ip').value = data.clean_ip;
@@ -829,10 +836,11 @@ const getHtmlPage = () => `
                                                                 function showQr(elementId) {
             let text = document.getElementById(elementId).textContent;
 
-            const qrImg = document.getElementById('qrImage');
+                        const qrImg = document.getElementById('qrImage');
             qrImg.src = "data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='400' height='400' viewBox='0 0 400 400'><text x='50%' y='50%' dominant-baseline='middle' text-anchor='middle' font-family='sans-serif' font-size='16' fill='%2300f3ff'>در حال تولید...</text></svg>";
             document.querySelector('.container').classList.add('blur-bg');
             document.getElementById('qrModal').style.display = 'flex';
+            document.body.classList.add('no-scroll');
 
             setTimeout(() => {
                 QRCode.toDataURL(text, {
@@ -851,9 +859,10 @@ const getHtmlPage = () => `
             }, 50);
         }
 
-        function closeQrModal() {
+                function closeQrModal() {
             document.querySelector('.container').classList.remove('blur-bg');
             document.getElementById('qrModal').style.display = 'none';
+            document.body.classList.remove('no-scroll');
         }
 
                 window.onload = checkAuth;
