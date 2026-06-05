@@ -37,10 +37,10 @@ const getHtmlPage = () => `
     <title>تریاک پنل | Teriak Panel</title>
     <link href="https://cdn.jsdelivr.net/gh/rastikerdar/vazirmatn@v33.0.0/Vazirmatn-font-face.css" rel="stylesheet" type="text/css" />
 <script src="https://cdn.jsdelivr.net/npm/qrcode/build/qrcode.min.js"></script>
-        <style>
+                <style>
         :root {
-            --bg-color: #030307;
-            --panel-bg: rgba(13, 13, 23, 0.75);
+            --bg-color: #050508;
+            --panel-bg: #0c0c14;
             --primary: #00f3ff;
             --secondary: #ff007b;
             --text: #f1f5f9;
@@ -58,39 +58,19 @@ const getHtmlPage = () => `
             display: flex; justify-content: center; align-items: center;
             min-height: 100vh;
             background-image: 
-                radial-gradient(circle at 50% 0%, rgba(120, 0, 255, 0.12) 0%, transparent 50%),
-                radial-gradient(circle at 0% 100%, rgba(0, 243, 255, 0.04) 0%, transparent 40%),
-                radial-gradient(circle at 100% 100%, rgba(255, 0, 120, 0.04) 0%, transparent 40%);
+                radial-gradient(circle at 50% 0%, rgba(120, 0, 255, 0.08) 0%, transparent 60%);
             position: relative;
             overflow-x: hidden;
         }
         .rgb-glow {
-            position: absolute;
-            width: 500px;
-            height: 500px;
-            background: linear-gradient(45deg, #00f3ff, #ff007b, #7800ff, #00f3ff);
-            background-size: 300% 300%;
-            filter: blur(120px);
-            opacity: 0.12;
-            border-radius: 50%;
-            animation: rotateGlow 15s linear infinite;
-            z-index: 0;
-            pointer-events: none;
-            top: 50%;
-            left: 50%;
-            transform: translate(-50%, -50%);
-        }
-        @keyframes rotateGlow {
-            0% { transform: translate(-50%, -50%) rotate(0deg) scale(1); background-position: 0% 50%; }
-            50% { transform: translate(-50%, -50%) rotate(180deg) scale(1.2); background-position: 100% 50%; }
-            100% { transform: translate(-50%, -50%) rotate(360deg) scale(1); background-position: 0% 50%; }
+            display: none;
         }
         body::before {
             content: '';
             position: absolute;
             top: 0; left: 0; width: 100%; height: 100%;
-            background-image: linear-gradient(rgba(255, 255, 255, 0.004) 1px, transparent 1px),
-                              linear-gradient(90deg, rgba(255, 255, 255, 0.004) 1px, transparent 1px);
+            background-image: linear-gradient(rgba(255, 255, 255, 0.003) 1px, transparent 1px),
+                              linear-gradient(90deg, rgba(255, 255, 255, 0.003) 1px, transparent 1px);
             background-size: 24px 24px;
             pointer-events: none;
             z-index: 0;
@@ -98,12 +78,9 @@ const getHtmlPage = () => `
         .container {
             background: var(--panel-bg);
             border: 1px solid rgba(0, 243, 255, 0.15);
-            backdrop-filter: blur(16px);
-            -webkit-backdrop-filter: blur(16px);
             box-shadow: 
-                0 20px 50px rgba(0, 0, 0, 0.5),
-                inset 0 1px 0 rgba(255, 255, 255, 0.05),
-                0 0 30px rgba(0, 243, 255, 0.03);
+                0 20px 50px rgba(0, 0, 0, 0.6),
+                inset 0 1px 0 rgba(255, 255, 255, 0.05);
             border-radius: 16px;
             width: 100%; max-width: 650px;
             padding: 40px;
@@ -156,11 +133,11 @@ const getHtmlPage = () => `
             -webkit-background-clip: text;
             -webkit-text-fill-color: transparent;
         }
-                .form-group { margin-bottom: 20px; }
+        .form-group { margin-bottom: 20px; }
         label { display: block; margin-bottom: 8px; color: var(--text-muted); font-size: 0.85em; font-weight: 600; letter-spacing: 0.5px; }
-                input, select {
+        input, select {
             width: 100%; padding: 12px 16px;
-            background: rgba(13, 13, 23, 0.9);
+            background: #07070c;
             border: 1px solid rgba(255, 255, 255, 0.08);
             color: #fff;
             border-radius: 8px; outline: none;
@@ -168,7 +145,7 @@ const getHtmlPage = () => `
             font-size: 0.95em;
         }
         select option {
-            background-color: #0d0d17 !important;
+            background-color: #07070c !important;
             color: #ffffff !important;
         }
         input:focus, select:focus {
@@ -209,9 +186,9 @@ const getHtmlPage = () => `
             transform: translateY(-1px);
         }
         
-                .output-box {
+        .output-box {
             margin-top: 30px; padding: 20px;
-            background: rgba(0, 0, 0, 0.55);
+            background: #050509;
             border: 1px solid rgba(255, 255, 255, 0.05);
             border-radius: 12px;
             position: relative;
@@ -258,7 +235,7 @@ const getHtmlPage = () => `
             box-shadow: 0 4px 12px rgba(255, 0, 123, 0.35);
         }
         
-                        .footer {
+        .footer {
             text-align: center; margin-top: 30px;
             border-top: 1px solid rgba(255, 255, 255, 0.05);
             padding-top: 20px;
@@ -283,26 +260,76 @@ const getHtmlPage = () => `
         .footer svg { width: 18px; height: 18px; fill: currentColor; }
         
         .blur-bg {
-            filter: blur(8px);
+            opacity: 0.15;
             pointer-events: none;
             user-select: none;
+            transition: opacity 0.3s ease;
         }
         .modal-overlay {
             position: fixed;
             top: 0; left: 0; width: 100%; height: 100%;
-            background: rgba(5, 5, 5, 0.85);
+            background: rgba(3, 3, 5, 0.95);
             display: flex; justify-content: center; align-items: center;
             z-index: 10000;
-            backdrop-filter: blur(4px);
         }
-                .modal-box {
-            background: rgba(13, 13, 23, 0.95);
+        .modal-box {
+            background: #0c0c14;
             border: 1px solid rgba(0, 243, 255, 0.25);
-            box-shadow: 0 25px 50px rgba(0, 0, 0, 0.8), 0 0 40px rgba(0, 243, 255, 0.1);
+            box-shadow: 0 25px 50px rgba(0, 0, 0, 0.8);
             padding: 40px;
             border-radius: 16px;
             width: 90%; max-width: 420px;
             text-align: center;
+        }
+
+        /* RESPONSIVE MEDIA QUERIES FOR MOBILE */
+        @media (max-width: 640px) {
+            body {
+                padding: 10px;
+            }
+            .container {
+                padding: 20px 15px;
+                border-radius: 12px;
+            }
+            .row {
+                flex-direction: column;
+                gap: 0;
+            }
+            .row .form-group {
+                margin-bottom: 20px;
+            }
+            .row .form-group:last-child {
+                margin-bottom: 0;
+            }
+            .modal-box {
+                padding: 25px 15px;
+                width: 95%;
+            }
+            h1 {
+                font-size: 1.5rem;
+            }
+            .output-header {
+                flex-direction: column;
+                align-items: flex-start;
+                gap: 10px;
+                padding-bottom: 12px;
+            }
+            .output-header div {
+                width: 100%;
+                justify-content: flex-start;
+                gap: 6px;
+            }
+            .btn-copy {
+                flex: 1;
+                text-align: center;
+                padding: 8px 10px;
+                font-size: 0.8em;
+            }
+            .row[style*="border"] {
+                flex-direction: column !important;
+                gap: 15px !important;
+                padding: 15px 10px !important;
+            }
         }
     </style>
 </head>
