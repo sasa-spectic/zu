@@ -1,6 +1,7 @@
 <div dir="rtl" align="center">
 
-<img width="741" height="854" alt="Screenshot 2026-06-05 025555" src="https://github.com/user-attachments/assets/66358bbd-b17e-4ba0-a565-b52d04b06613" />
+<img width="938" height="862" alt="Screenshot 2026-06-07 120125" src="https://github.com/user-attachments/assets/2541e695-b214-4840-8cbc-0ab4b26ffe25" />
+
 
 <div dir="rtl" align="right">
 
@@ -101,10 +102,6 @@
 
 ---
 
-## 🙏 تشکر و قدردانی
-تشکر ویژه از [bia-pain-bache](https://github.com/bia-pain-bache) عزیز بابت ارائه‌ی **Proxy IP** قدرتمند و رایگانی که در این پروژه به عنوان پیش‌فرض قرار داده شده است.
-
----
 > طراحی و توسعه با ❤️ برای اینترنت آزاد.
 
 </div>
