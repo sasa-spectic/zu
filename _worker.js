@@ -5,11 +5,11 @@ import { connect } from 'cloudflare:sockets';
 // ==========================================
 const DEFAULT_SETTINGS = {
     name: "teriak panel",
-    clean_ip: "104.17.121.0",
+    clean_ip: "",
     port: "443",
     uuid: "", 
     path: "/nab",
-    proxy_ip: "bpb.yousef.isegaro.com",
+    proxy_ip: "proxyip.cmliussss.net",
     frag_length: "20-30",
     frag_interval: "1-2"
 };
@@ -48,7 +48,7 @@ const getHtmlPage = () => `
             --border: rgba(255, 255, 255, 0.06);
         }
         * { box-sizing: border-box; }
-        *, body, input, select, button, option, pre, span, div, h1, h2, label {
+                *, body, input, select, button, option, pre, span, div, h1, h2, label, textarea {
             font-family: 'Vazirmatn', sans-serif !important;
         }
         body {
@@ -135,7 +135,7 @@ const getHtmlPage = () => `
         }
         .form-group { margin-bottom: 20px; }
         label { display: block; margin-bottom: 8px; color: var(--text-muted); font-size: 0.85em; font-weight: 600; letter-spacing: 0.5px; }
-        input, select {
+                input, select, textarea {
             width: 100%; padding: 12px 16px;
             background: #07070c;
             border: 1px solid rgba(255, 255, 255, 0.08);
@@ -143,6 +143,7 @@ const getHtmlPage = () => `
             border-radius: 8px; outline: none;
             transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
             font-size: 0.95em;
+            resize: vertical;
         }
         select option {
             background-color: #07070c !important;
@@ -344,16 +345,16 @@ const getHtmlPage = () => `
                 <span class="dot"></span>
                 <span>STATUS: OPERATIONAL</span>
             </div>
-            <h1>تریاک پنل <span style="font-size: 0.75em; color: var(--secondary); font-weight: bold; margin-right: 8px;"> 0.5</span></h1>
+            <h1>تریاک پنل <span style="font-size: 0.75em; color: var(--secondary); font-weight: bold; margin-right: 8px;"> 0.6</span></h1>
         </div>
         <form id="settingsForm">
             <div class="form-group">
                 <label>نام پنل / کانفیگ</label>
                 <input type="text" id="name" required>
             </div>
-            <div class="form-group">
-                <label>آی‌پی تمیز (Clean IP)</label>
-                <input type="text" id="clean_ip" dir="ltr" required>
+                        <div class="form-group">
+                <label>آی‌پی‌های تمیز (هر خط یک آی‌پی)</label>
+                <textarea id="clean_ip" dir="ltr" rows="3" placeholder="104.17.121.0&#10;104.17.122.0" required></textarea>
             </div>
             <div class="row">
                 <div class="form-group">
@@ -405,13 +406,24 @@ const getHtmlPage = () => `
             </div>
             <pre id="vlessOutput" style="margin-bottom: 20px; color: #fff;"></pre>
 
-                        <div class="output-header">
+                                                <div class="output-header">
                 <span>کانفیگ کامل (JSON + Fragment):</span>
                 <div style="display: flex; gap: 8px;">
                     <button class="btn-copy" onclick="copyText('jsonOutput')">کپی JSON</button>
                 </div>
             </div>
-            <pre id="jsonOutput"></pre>
+            <pre id="jsonOutput" style="margin-bottom: 20px;"></pre>
+
+                        <div class="output-header">
+                <span>لینک ساب عادی (Base64):</span>
+                <div style="display: flex; gap: 8px;">
+                    <button class="btn-copy" onclick="copyText('subOutput')">کپی لینک ساب</button>
+                    <button type="button" class="btn-copy" style="background: rgba(0, 243, 255, 0.1); border-color: rgba(0, 243, 255, 0.3);" onclick="showQr('subOutput')">📱 کد QR</button>
+                </div>
+            </div>
+            <pre id="subOutput" style="margin-bottom: 20px; color: #fff;"></pre>
+
+            
         </div>
 
         <div class="footer">
@@ -478,69 +490,53 @@ const getHtmlPage = () => `
             }
         }
 
-        async function resetDefaults() {
+                async function resetDefaults() {
             if(confirm('آیا از بازگشت به تنظیمات کارخانه مطمئن هستید؟')) {
                 document.getElementById('name').value = 'teriak panel';
-                document.getElementById('clean_ip').value = '104.17.121.0';
+                document.getElementById('clean_ip').value = window.location.hostname;
                 document.getElementById('port').value = '443';
                 document.getElementById('uuid').value = crypto.randomUUID();
                 document.getElementById('path').value = '/nab';
-                document.getElementById('proxy_ip').value = 'bpb.yousef.isegaro.com';
+                document.getElementById('proxy_ip').value = 'proxyip.cmliussss.net';
                 document.getElementById('frag_length').value = '20-30';
                 document.getElementById('frag_interval').value = '1-2';
             }
         }
 
-        async function checkAuth() {
-            try {
-                const statusRes = await fetch('/panel/status');
-                const statusData = await statusRes.json();
+                function showSetupModal() {
+            document.querySelector('.container').classList.add('blur-bg');
+            document.getElementById('authModal').style.display = 'flex';
+            document.body.classList.add('no-scroll');
+            document.getElementById('modalTitle').textContent = 'تعیین رمز عبور';
+            document.getElementById('modalDesc').textContent = 'برای اولین ورود، لطفا رمز عبور پنل خود را تعیین کنید.';
+            document.getElementById('pwdConfirmGroup').style.display = 'block';
+            document.getElementById('btnAuthSubmit').textContent = 'ثبت رمز عبور';
+            
+            document.getElementById('btnAuthSubmit').onclick = async () => {
+                const pwd = document.getElementById('panelPwd').value;
+                const pwdConf = document.getElementById('panelPwdConfirm').value;
+                if (!pwd) { alert('لطفا رمز عبور را وارد کنید'); return; }
+                if (pwd !== pwdConf) { alert('رمز عبور و تکرار آن یکسان نیستند'); return; }
+                if (pwd.length < 4) { alert('رمز عبور باید حداقل ۴ کاراکتر باشد'); return; }
                 
-                                if (!statusData.hasPassword) {
-                    document.querySelector('.container').classList.add('blur-bg');
-                    document.getElementById('authModal').style.display = 'flex';
-                    document.body.classList.add('no-scroll');
-                    document.getElementById('modalTitle').textContent = 'تعیین رمز عبور';
-                    document.getElementById('modalDesc').textContent = 'برای اولین ورود، لطفا رمز عبور پنل خود را تعیین کنید.';
-                    document.getElementById('pwdConfirmGroup').style.display = 'block';
-                    document.getElementById('btnAuthSubmit').textContent = 'ثبت رمز عبور';
-                    
-                    document.getElementById('btnAuthSubmit').onclick = async () => {
-                        const pwd = document.getElementById('panelPwd').value;
-                        const pwdConf = document.getElementById('panelPwdConfirm').value;
-                        if (!pwd) { alert('لطفا رمز عبور را وارد کنید'); return; }
-                        if (pwd !== pwdConf) { alert('رمز عبور و تکرار آن یکسان نیستند'); return; }
-                        if (pwd.length < 4) { alert('رمز عبور باید حداقل ۴ کاراکتر باشد'); return; }
-                        
-                        const res = await fetch('/panel/set-password', {
-                            method: 'POST',
-                            headers: { 'Content-Type': 'application/json' },
-                            body: JSON.stringify({ password: pwd })
-                        });
-                                                if (res.ok) {
-                            sessionStorage.setItem('panel_password', pwd);
-                            document.querySelector('.container').classList.remove('blur-bg');
-                            document.getElementById('authModal').style.display = 'none';
-                            document.body.classList.remove('no-scroll');
-                            loadSettings();
-                        } else {
-                            alert('خطا در ثبت رمز عبور');
-                        }
-                    };
+                const res = await fetch('/panel/set-password', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ password: pwd })
+                });
+                if (res.ok) {
+                    sessionStorage.setItem('panel_password', pwd);
+                    document.querySelector('.container').classList.remove('blur-bg');
+                    document.getElementById('authModal').style.display = 'none';
+                    document.body.classList.remove('no-scroll');
+                    loadSettings();
                 } else {
-                    const savedPwd = sessionStorage.getItem('panel_password');
-                    if (savedPwd) {
-                        loadSettings();
-                    } else {
-                        showLoginModal();
-                    }
+                    alert('خطا در ثبت رمز عبور');
                 }
-            } catch (e) {
-                alert('خطا در ارتباط با سرور');
-            }
+            };
         }
 
-                function showLoginModal() {
+        function showLoginModal() {
             document.querySelector('.container').classList.add('blur-bg');
             document.getElementById('authModal').style.display = 'flex';
             document.body.classList.add('no-scroll');
@@ -557,7 +553,7 @@ const getHtmlPage = () => `
                     headers: { 'X-Panel-Password': pwd }
                 });
                 
-                                if (res.status === 200) {
+                if (res.status === 200) {
                     sessionStorage.setItem('panel_password', pwd);
                     document.querySelector('.container').classList.remove('blur-bg');
                     document.getElementById('authModal').style.display = 'none';
@@ -576,6 +572,28 @@ const getHtmlPage = () => `
                     alert('رمز عبور نادرست است!');
                 }
             };
+        }
+
+        async function checkAuth() {
+            const savedPwd = sessionStorage.getItem('panel_password');
+            if (savedPwd) {
+                loadSettings();
+            } else {
+                // نمایش آنی و فاقد تأخیر فرم ورود (با فرض این که قبلاً رمز تعیین شده)
+                showLoginModal();
+                
+                // بررسی وضعیت تنظیم رمز عبور در پس‌زمینه بدون بلاک کردن رابط کاربری
+                try {
+                    const statusRes = await fetch('/panel/status');
+                    const statusData = await statusRes.json();
+                    if (!statusData.hasPassword) {
+                        // اگر رمزی ثبت نشده بود، فرم را به حالت تعیین رمز تغییر جهت می‌دهد
+                        showSetupModal();
+                    }
+                } catch (e) {
+                    console.warn('عدم امکان بررسی وضعیت رمز در پس زمینه', e);
+                }
+            }
         }
 
         document.getElementById('settingsForm').addEventListener('submit', async (e) => {
@@ -611,13 +629,20 @@ const getHtmlPage = () => `
             alert('✅ تنظیمات در سرور کلودفلر ذخیره شد.');
         });
 
-        function generateOutput(data) {
+                function generateOutput(data) {
             if(!data.uuid) return;
-            const outputBox = document.getElementById('outputBox');
+                        const outputBox = document.getElementById('outputBox');
+            
+            const ips = data.clean_ip.split('\\n').map(ip => ip.trim()).filter(ip => ip);
+            const primaryIP = ips[0] || window.location.hostname;
+            data.clean_ip = primaryIP;
             
             // 1. تولید لینک Vless
             const vlessLink = \`vless://\${data.uuid}@\${data.clean_ip}:\${data.port}?path=\${encodeURIComponent(data.path)}&security=tls&encryption=none&insecure=0&host=\${host}&fp=chrome&type=ws&allowInsecure=0&sni=\${host}#\${data.name}\`;
-            document.getElementById('vlessOutput').textContent = vlessLink;
+                        document.getElementById('vlessOutput').textContent = vlessLink;
+
+                                    const subLink = \`\${window.location.protocol}//\${host}/sub/\${data.uuid}\`;
+            document.getElementById('subOutput').textContent = subLink;
 
             // 2. تولید فرمت جدید و دقیق JSON بر اساس تمپلیت دریافتی
             const jsonConfig = {
@@ -925,9 +950,20 @@ function closeSocketQuietly(socket) {
 }
 
 // ------------------------------------------
-// DoH QUERY ENGINE
+// DoH QUERY ENGINE & DNS CACHE
 // ------------------------------------------
-async function dohQuery(domain, recordType) {
+const DNS_CACHE = new Map();
+const DNS_CACHE_TTL = 5 * 60 * 1000; // 5 Minutes in milliseconds
+
+async function dohQuery(domain, recordType) { 
+    const cacheKey = `${domain}:${recordType}`;
+    if (DNS_CACHE.has(cacheKey)) {
+        const cached = DNS_CACHE.get(cacheKey);
+        if (Date.now() < cached.expires) {
+            return cached.data;
+        }
+        DNS_CACHE.delete(cacheKey);
+    }
     try {
         const typeMap = { 'A': 1, 'AAAA': 28 };
         const qtype = typeMap[recordType.toUpperCase()] || 1;
@@ -953,7 +989,7 @@ async function dohQuery(domain, recordType) {
         qview.setUint16(12 + qname.length, qtype);
         qview.setUint16(12 + qname.length + 2, 1);
 
-        const response = await fetch(DOH_RESOLVER, {
+        const response = await fetch(DOH_RESOLVER, { 
             method: 'POST',
             headers: {
                 'Content-Type': 'application/dns-message',
@@ -980,7 +1016,7 @@ async function dohQuery(domain, recordType) {
                     p = ((len & 0x3F) << 8) | buf[p + 1];
                     jumped = true;
                     continue;
-                }
+                } 
                 labels.push(new TextDecoder().decode(buf.slice(p + 1, p + 1 + len)));
                 p += len + 1;
             }
@@ -1017,6 +1053,7 @@ async function dohQuery(domain, recordType) {
             }
             answers.push({ name, type, TTL: ttl, data });
         }
+        DNS_CACHE.set(cacheKey, { data: answers, expires: Date.now() + DNS_CACHE_TTL });
         return answers;
     } catch (e) {
         return [];
@@ -1317,6 +1354,14 @@ function createDownstreamSender(webSocket, headerData = null) {
     };
 }
 
+async function waitForBackpressure(ws) {
+    if (typeof ws.bufferedAmount === 'number') {
+        while (ws.bufferedAmount > 256 * 1024) {
+            await new Promise(r => setTimeout(r, 100));
+        }
+    }
+}
+
 async function connectStreams(remoteSocket, webSocket, headerData, retryFunc) {
     let header = headerData, hasData = false, reader, useBYOB = false;
     const BYOB_LIMIT = 64 * 1024;
@@ -1333,6 +1378,7 @@ async function connectStreams(remoteSocket, webSocket, headerData, retryFunc) {
     try {
         if (!useBYOB) {
             while (true) {
+                await waitForBackpressure(webSocket);
                 const { done, value } = await reader.read();
                 if (done) break;
                 if (!value || value.byteLength === 0) continue;
@@ -1342,6 +1388,7 @@ async function connectStreams(remoteSocket, webSocket, headerData, retryFunc) {
         } else {
             let readBuffer = new ArrayBuffer(BYOB_LIMIT);
             while (true) {
+                await waitForBackpressure(webSocket);
                 const { done, value } = await reader.read(new Uint8Array(readBuffer, 0, BYOB_LIMIT));
                 if (done) break;
                 if (!value || value.byteLength === 0) continue;
@@ -1358,7 +1405,7 @@ async function connectStreams(remoteSocket, webSocket, headerData, retryFunc) {
         }
         await downstreamSender.flush();
     } catch (err) { 
-        closeSocketQuietly(webSocket); 
+        closeSocketQuietly(webSocket);
     } finally { 
         try { reader.cancel(); } catch (e) {} 
         try { reader.releaseLock(); } catch (e) {} 
@@ -1468,22 +1515,34 @@ async function forwardVlessUDP(udpChunk, webSocket, respHeader) {
 // ==========================================
 // 4. MAIN ROUTER & VLESS PROXY CORE
 // ==========================================
-async function handleVLESS(request, env) {
+async function handleVLESS(request, env, storedData = null) {
     const socketPair = new WebSocketPair();
     const [clientSock, serverSock] = Object.values(socketPair);
     serverSock.accept();
     serverSock.binaryType = 'arraybuffer';
 
+    const heartbeat = setInterval(() => {
+        if (serverSock.readyState === WebSocket.OPEN) {
+            try {
+                serverSock.send(new Uint8Array(0));
+            } catch (e) {}
+        } else {
+            clearInterval(heartbeat);
+        }
+    }, 30000);
+
     let remoteConnWrapper = { socket: null, connectingPromise: null, retryConnect: null };
     let reqUUID = null;
     let isHeaderParsed = false;
-    let isDnsQuery = false;
-    let chunkBuffer = new Uint8Array(0);
+            let isDnsQuery = false;
+        let chunkBuffer = new Uint8Array(0);
 
-    let storedData = await env.TERIAK_KV.get("settings", "json");
-    if (!storedData) storedData = DEFAULT_SETTINGS;
+        if (!storedData) {
+            storedData = await env.TERIAK_KV.get("settings", "json");
+            if (!storedData) storedData = DEFAULT_SETTINGS;
+        }
 
-    const validUUID = storedData.uuid;
+        const validUUID = storedData.uuid;
     const proxyIP = storedData.proxy_ip;
 
     let wsChain = Promise.resolve();
@@ -1584,7 +1643,7 @@ async function handleVLESS(request, env) {
                     return;
                 }
 
-                // TCP Connection Flow using Racing & pre-loaded DoH candidates
+                                                                // TCP Connection Flow using Racing & pre-loaded DoH candidates
                 const connectTCP = async (dataPayload = null, useFallback = true) => {
                     if (remoteConnWrapper.connectingPromise) {
                         await remoteConnWrapper.connectingPromise;
@@ -1601,7 +1660,7 @@ async function handleVLESS(request, env) {
                                 throw err;
                             }
                         }
-                        remoteConnWrapper.socket = s;
+                        remoteConnWrapper.socket = s; 
                         s.closed.catch(() => {}).finally(() => closeSocketQuietly(serverSock));
                         connectStreams(s, serverSock, respHeader, null);
                     })();
@@ -1658,7 +1717,8 @@ async function handleVLESS(request, env) {
         });
     });
 
-    serverSock.addEventListener('close', () => {
+        serverSock.addEventListener('close', () => {
+        clearInterval(heartbeat);
         closeSocketQuietly(serverSock);
         if (wsFinished) return;
         wsFinished = true;
@@ -1683,14 +1743,150 @@ export default {
         const upgradeHeader = (request.headers.get('Upgrade') || '').toLowerCase();
         
         if (upgradeHeader === 'websocket') {
-            return handleVLESS(request, env);
+            let storedData = await env.TERIAK_KV.get("settings", "json");
+            if (!storedData) storedData = DEFAULT_SETTINGS;
+            let configPath = storedData.path || "/nab";
+            if (!configPath.startsWith('/')) {
+                configPath = '/' + configPath;
+            }
+            if (url.pathname === configPath) {
+                return handleVLESS(request, env, storedData);
+            }
+            return new Response(`<!DOCTYPE html><html><head><title>Welcome to nginx!</title><style>body {width: 35em;margin: 0 auto;font-family: Tahoma, Verdana, Arial, sans-serif;}</style></head><body><h1>Welcome to nginx!</h1><p>If you see this page, the nginx web server is successfully installed and working.</p></body></html>`, {
+                status: 200,
+                headers: { 'Content-Type': 'text/html; charset=UTF-8' }
+            });
         }
 
-        if (url.pathname === '/panel') {
+                if (url.pathname === '/panel') {
             return new Response(getHtmlPage(), {
                 status: 200,
                 headers: { 'Content-Type': 'text/html; charset=UTF-8' }
             });
+        }
+
+                                if (url.pathname.startsWith('/sub/')) {
+            const pathParts = url.pathname.split('/');
+            const reqType = 'sub';
+            const reqUuid = pathParts[2];
+            let storedData = await env.TERIAK_KV.get("settings", "json");
+            if (!storedData) storedData = DEFAULT_SETTINGS;
+            
+            if (reqUuid && reqUuid === storedData.uuid) {
+                const cleanIpVal = storedData.clean_ip || url.hostname;
+                const ips = cleanIpVal.split('\n').map(ip => ip.trim()).filter(ip => ip);
+                const host = request.headers.get('host') || url.host;
+                
+                if (reqType === 'sub') {
+                    const configs = ips.map((ip, index) => {
+                        const suffix = ips.length > 1 ? ` - ${index + 1}` : '';
+                        return `vless://${storedData.uuid}@${ip}:${storedData.port}?path=${encodeURIComponent(storedData.path)}&security=tls&encryption=none&insecure=0&host=${host}&fp=chrome&type=ws&allowInsecure=0&sni=${host}#${encodeURIComponent(storedData.name + suffix)}`;
+                    });
+                    
+                    const rawSub = configs.join('\n');
+                    const subContent = btoa(unescape(encodeURIComponent(rawSub)));
+                    return new Response(subContent, { 
+                        status: 200,
+                        headers: {
+                            'Content-Type': 'text/plain; charset=utf-8',
+                            'Cache-Control': 'no-store'
+                        }
+                    });
+                } else if (reqType === 'sub-json') {
+                    const primaryIP = ips[0] || host;
+                    const jsonConfig = {
+                        "remarks": storedData.name,
+                        "version": { "min": "25.10.15" },
+                        "log": { "loglevel": "none" },
+                        "dns": {
+                            "servers": [
+                                { "address": "https://8.8.8.8/dns-query", "tag": "remote-dns" },
+                                { "address": "8.8.8.8", "domains": [ "full:" + host ], "skipFallback": true }
+                            ],
+                            "queryStrategy": "UseIP",
+                            "tag": "dns"
+                        },
+                        "inbounds": [
+                            {
+                                "listen": "127.0.0.1", "port": 10808, "protocol": "socks",
+                                "settings": { "auth": "noauth", "udp": true },
+                                "sniffing": { "destOverride": [ "http", "tls" ], "enabled": true, "routeOnly": true },
+                                "tag": "mixed-in"
+                            },
+                            {
+                                "listen": "127.0.0.1", "port": 10853, "protocol": "dokodemo-door",
+                                "settings": { "address": "1.1.1.1", "network": "tcp,udp", "port": 53 },
+                                "tag": "dns-in"
+                            }
+                        ],
+                        "outbounds": [
+                            {
+                                "protocol": "vless",
+                                "settings": {
+                                    "vnext": [{
+                                        "address": primaryIP,
+                                        "port": parseInt(storedData.port),
+                                        "users": [{ "id": storedData.uuid, "encryption": "none" }]
+                                    }]
+                                },
+                                "streamSettings": {
+                                    "network": "ws",
+                                    "wsSettings": { "host": host, "path": storedData.path },
+                                    "security": "tls",
+                                    "tlsSettings": {
+                                        "serverName": host, "fingerprint": "chrome",
+                                        "alpn": [ "http/1.1" ], "allowInsecure": false
+                                    },
+                                    "sockopt": { "dialerProxy": "fragment" }
+                                },
+                                "tag": "proxy"
+                            },
+                            {
+                                "protocol": "freedom",
+                                "settings": {
+                                    "fragment": {
+                                        "packets": "tlshello",
+                                        "length": storedData.frag_length,
+                                        "interval": storedData.frag_interval
+                                    }
+                                },
+                                "streamSettings": {
+                                    "sockopt": {
+                                        "domainStrategy": "UseIP",
+                                        "happyEyeballs": { "tryDelayMs": 250, "prioritizeIPv6": false, "interleave": 2, "maxConcurrentTry": 4 }
+                                    }
+                                },
+                                "tag": "fragment"
+                            },
+                            { "protocol": "dns", "settings": { "nonIPQuery": "reject" }, "tag": "dns-out" },
+                            { "protocol": "freedom", "settings": { "domainStrategy": "UseIP" }, "tag": "direct" },
+                            { "protocol": "blackhole", "settings": { "response": { "type": "http" } }, "tag": "block" }
+                        ],
+                        "routing": {
+                            "domainStrategy": "IPIfNonMatch",
+                            "rules": [
+                                { "inboundTag": [ "mixed-in" ], "port": 53, "outboundTag": "dns-out", "type": "field" },
+                                { "inboundTag": [ "dns-in" ], "outboundTag": "dns-out", "type": "field" },
+                                { "inboundTag": [ "remote-dns" ], "outboundTag": "proxy", "type": "field" },
+                                { "inboundTag": [ "dns" ], "outboundTag": "direct", "type": "field" },
+                                { "domain": [ "geosite:private" ], "outboundTag": "direct", "type": "field" },
+                                { "ip": [ "geoip:private" ], "outboundTag": "direct", "type": "field" },
+                                { "network": "udp", "outboundTag": "block", "type": "field" },
+                                { "network": "tcp", "outboundTag": "proxy", "type": "field" }
+                            ]
+                        }
+                    };
+                    return new Response(JSON.stringify(jsonConfig, null, 2), { 
+                        status: 200,
+                        headers: {
+                            'Content-Type': 'application/json; charset=utf-8',
+                            'Cache-Control': 'no-store'
+                        }
+                    });
+                }
+            } else {
+                return new Response("Unauthorized", { status: 401 });
+            }
         }
         
                 if (url.pathname === '/panel/status') {
@@ -1728,11 +1924,12 @@ export default {
                 } 
             }
 
-            if (request.method === 'GET') {
+                        if (request.method === 'GET') {
                 let data = await env.TERIAK_KV.get("settings", "json");
                 if (!data) {
                     data = DEFAULT_SETTINGS;
                     data.uuid = crypto.randomUUID(); 
+                    data.clean_ip = new URL(request.url).hostname;
                     await env.TERIAK_KV.put("settings", JSON.stringify(data));
                 }
                 return new Response(JSON.stringify(data), { headers: { 'Content-Type': 'application/json' } });
