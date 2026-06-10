@@ -1,5 +1,10 @@
 import { connect } from 'cloudflare:sockets';
 
+// حافظه‌های موقت گلوبال برای کنترل ترافیک و مهار انفجار تراکنش‌های D1
+const GLOBAL_TRAFFIC_CACHE = new Map();
+const ACTIVE_CONNECTIONS_COUNT = new Map();
+const GLOBAL_LAST_ACTIVE_WRITE = new Map();
+
 export default {
     async fetch(request, env, ctx) {
     await ensureSchema(env.DB);
@@ -436,13 +441,19 @@ export default {
             // API GET: دریافت لیست کاربران از دیتابیس D1
       if (url.pathname === '/api/users' && request.method === 'GET') {
         try {
-          const now = Date.now();
-          await env.DB.prepare("UPDATE users SET is_online = CASE WHEN last_active IS NOT NULL AND (? - last_active) < 60000 THEN 1 ELSE 0 END").bind(now).run();
           const { results } = await env.DB.prepare("SELECT * FROM users ORDER BY id DESC").all();
+          const now = Date.now();
+          const enrichedUsers = (results || []).map(user => {
+            const isOnline = (user.last_active && (now - user.last_active) < 30000) ? 1 : 0;
+            return {
+              ...user,
+              is_online: isOnline
+            };
+          });
           const jsonResponse = JSON.stringify({
-            users: results || [],
+            users: enrichedUsers,
             totalTodayRequests: 0,
-            serverTime: Date.now()
+            serverTime: now
           });
           return new Response(jsonResponse, {
             headers: { 
@@ -1134,41 +1145,46 @@ async function handleVLESS(request, env, storedData = null, ctx = null) {
     serverSock.accept();
     serverSock.binaryType = 'arraybuffer';
 
-    let sessionBytes = 0;
     let base_used_gb = 0;
     let limit_gb = null;
     let username = null;
-    const THRESHOLD = 50 * 1024 * 1024; // 50MB
-    let lastDataTime = Date.now();
     let tickCount = 0;
     let validUUID = null;
 
-    async function commitBytes(force = false) {
-        if (sessionBytes <= 0 || !username) return;
-        if (!force && sessionBytes < THRESHOLD) return;
+    function addBytes(bytes) {
+        if (bytes <= 0 || !username) return;
+        
+        let current = GLOBAL_TRAFFIC_CACHE.get(username) || 0;
+        current += bytes;
+        
+        const threshold = 50 * 1024 * 1024;
+        if (current >= threshold) { 
+            const chunksOf50MB = Math.floor(current / threshold);
+            const bytesToCommit = chunksOf50MB * threshold;
+            const deltaGb = bytesToCommit / (1024 * 1024 * 1024);
+            const leftover = current - bytesToCommit;
+            
+            GLOBAL_TRAFFIC_CACHE.set(username, leftover); 
 
-        const deltaGb = sessionBytes / (1024 * 1024 * 1024);
-        const bytesToCommit = sessionBytes;
-        sessionBytes = 0;
+            const writeTask = async () => {
+                try {
+                    console.log(`[D1-WRITE] [addBytes] 50MB Threshold reached for ${username}. Committing: ${Math.round(bytesToCommit / 1024 / 1024)} MB`);
+                    await env.DB.prepare("UPDATE users SET used_gb = used_gb + ? WHERE username = ?").bind(deltaGb, username).run();
+                    base_used_gb += deltaGb;
+                } catch (e) {
+                    let recovered = GLOBAL_TRAFFIC_CACHE.get(username) || 0;
+                    GLOBAL_TRAFFIC_CACHE.set(username, recovered + bytesToCommit);
+                    console.error(`[D1-ERROR] [addBytes] Failed to commit traffic for ${username}. Recovered cache.`, e);
+                }
+            };
 
-        try {
-            await env.DB.prepare("UPDATE users SET used_gb = used_gb + ? WHERE username = ?").bind(deltaGb, username).run();
-            base_used_gb += deltaGb;
-        } catch (e) {
-            sessionBytes += bytesToCommit;
-        }
-    }
-
-    async function addBytes(bytes) {
-        if (bytes <= 0) return;
-        sessionBytes += bytes;
-
-        if (sessionBytes >= THRESHOLD) {
             if (ctx) {
-                ctx.waitUntil(commitBytes(false));
+                ctx.waitUntil(writeTask());
             } else {
-                await commitBytes(false);
+                writeTask();
             }
+        } else {
+            GLOBAL_TRAFFIC_CACHE.set(username, current);
         }
     }
 
@@ -1176,27 +1192,45 @@ async function handleVLESS(request, env, storedData = null, ctx = null) {
     const setOffline = () => {
         if (isOfflineSet) return;
         isOfflineSet = true;
-        const uuidToUpdate = validUUID;
-        if (!uuidToUpdate) return;
-        const query = env.DB.prepare("UPDATE users SET is_online = 0 WHERE uuid = ?").bind(uuidToUpdate);
         
-        const runOfflineTasks = async () => {
-            try {
-                await query.run();
-            } catch (e) {}
-            if (sessionBytes > 0 && username) {
-                const deltaGb = sessionBytes / (1024 * 1024 * 1024);
-                sessionBytes = 0;
-                try {
-                    await env.DB.prepare("UPDATE users SET used_gb = used_gb + ? WHERE username = ?").bind(deltaGb, username).run();
-                } catch (e) {}
-            }
-        };
+        const uname = username;
+        if (!uname) return;
 
-        if (ctx) {
-            ctx.waitUntil(runOfflineTasks());
+        // کاهش تعداد اتصالات فعال این کلاینت
+        let activeCount = ACTIVE_CONNECTIONS_COUNT.get(uname) || 1;
+        activeCount = activeCount - 1;
+        
+        // وقتی تعداد اتصالات فعال کاربر روی این سرور به صفر برسد، حجم خرد باقیمانده ثبت می‌شود
+        if (activeCount <= 0) {
+            ACTIVE_CONNECTIONS_COUNT.delete(uname);
+            
+            let cachedBytes = GLOBAL_TRAFFIC_CACHE.get(uname) || 0;
+            if (cachedBytes > 0) {
+                GLOBAL_TRAFFIC_CACHE.set(uname, 0);
+                const deltaGb = cachedBytes / (1024 * 1024 * 1024);
+                
+                const writeTask = async () => {
+                    try {
+                        console.log(`[D1-WRITE] [setOffline] User ${uname} disconnected. Flushing leftover volume: ${Math.round(cachedBytes / 1024 / 1024)} MB.`);
+                        await env.DB.prepare("UPDATE users SET used_gb = used_gb + ? WHERE username = ?").bind(deltaGb, uname).run();
+                    } catch (e) {
+                        let recovered = GLOBAL_TRAFFIC_CACHE.get(uname) || 0;
+                        GLOBAL_TRAFFIC_CACHE.set(uname, recovered + cachedBytes);
+                        console.error(`[D1-ERROR] [setOffline] Failed to commit leftover traffic for ${uname}`, e);
+                    }
+                };
+                
+                if (ctx) {
+                    ctx.waitUntil(writeTask());
+                } else {
+                    writeTask();
+                }
+            } else {
+                console.log(`[D1-SKIP] [setOffline] User ${uname} disconnected, but no leftover traffic to write.`);
+            }
         } else {
-            runOfflineTasks();
+            ACTIVE_CONNECTIONS_COUNT.set(uname, activeCount);
+            console.log(`[D1-SKIP] [setOffline] User ${uname} still has ${activeCount} active connections. Postponing volume write.`);
         }
     };
 
@@ -1209,15 +1243,11 @@ async function handleVLESS(request, env, storedData = null, ctx = null) {
                 if (!validUUID) return;
                 
                 tickCount++;
-                // هر ۴ تیک ۱۵ ثانیه‌ای معادل ۶۰ ثانیه می‌شود
+                // هر ۴ تیک ۱۵ ثانیه‌ای معادل ۶۰ ثانیه می‌شود (هر ۱ دقیقه)
                 if (tickCount >= 4) {
                     tickCount = 0;
                     
-                    // بررسی وضعیت آنلاین بودن در رم ورکر بر اساس دیتای دریافتی در ۶۰ ثانیه اخیر
-                    const currentLocalOnline = (Date.now() - lastDataTime) < 60000;
-                    
-                    // خواندن وضعیت کاربر از دیتابیس برای کنترل حجم و زمان
-                    const user = await env.DB.prepare("SELECT is_active, is_online, limit_gb, used_gb, expiry_days, created_at FROM users WHERE uuid = ?").bind(validUUID).first();
+                    const user = await env.DB.prepare("SELECT is_active, limit_gb, used_gb, expiry_days, created_at FROM users WHERE uuid = ?").bind(validUUID).first();
                     
                     let isExpired = false;
                     if (!user || user.is_active === 0) {
@@ -1236,19 +1266,24 @@ async function handleVLESS(request, env, storedData = null, ctx = null) {
                     }
 
                     if (isExpired) {
-                        await env.DB.prepare("UPDATE users SET is_active = 0, is_online = 0 WHERE uuid = ?").bind(validUUID).run();
-                        clearInterval(heartbeat);
-                        closeSocketQuietly(serverSock);
-                        return;
-                    }
+                                console.log(`[D1-WRITE] [HEARTBEAT] Expired user ${username}. Deactivating.`);
+                                await env.DB.prepare("UPDATE users SET is_active = 0, last_active = 0 WHERE uuid = ?").bind(validUUID).run();
+                                clearInterval(heartbeat);
+                                closeSocketQuietly(serverSock);
+                                return;
+                            }
 
-                    const targetOnlineVal = currentLocalOnline ? 1 : 0;
-                    // اگر وضعیت جدید در حافظه ورکر با مقدار دیتابیس متفاوت بود، مقدار دیتابیس آپدیت می‌شود
-                    if (user.is_online !== targetOnlineVal) {
-                        await env.DB.prepare("UPDATE users SET is_online = ?, last_active = ? WHERE uuid = ?").bind(targetOnlineVal, Date.now(), validUUID).run();
-                    }
-                }
-            } catch (e) {}
+                            const now = Date.now();
+                            const lastRecorded = GLOBAL_LAST_ACTIVE_WRITE.get(validUUID) || 0;
+                            
+                            // مهار هوشمند رایت‌های تکراری: به روزرسانی زمان آخرین فعالیت برای ارزیابی پویای وضعیت آنلاین بودن
+                            if (now - lastRecorded > 60000) {
+                                GLOBAL_LAST_ACTIVE_WRITE.set(validUUID, now);
+                                console.log(`[D1-WRITE] [HEARTBEAT] updating last_active in DB for ${username}`);
+                                await env.DB.prepare("UPDATE users SET last_active = ? WHERE uuid = ?").bind(now, validUUID).run();
+                            }
+                        }
+                    } catch (e) {}
         } else {
             clearInterval(heartbeat);
         }
@@ -1308,8 +1343,6 @@ async function handleVLESS(request, env, storedData = null, ctx = null) {
     const processWsMessage = async (chunk) => {
         const bytes = chunk.byteLength || 0;
         await addBytes(bytes);
-        
-        lastDataTime = Date.now();
 
         if (isDnsQuery) {
             await forwardVlessUDP(chunk, serverSock, null);
@@ -1361,6 +1394,19 @@ async function handleVLESS(request, env, storedData = null, ctx = null) {
             base_used_gb = user.used_gb || 0;
 
             isHeaderParsed = true;
+
+            // افزایش تعداد اتصالات فعال کاربر در حافظه رم و قرار دادن در دیتابیس به صورت آنلاین
+            let activeCount = ACTIVE_CONNECTIONS_COUNT.get(username) || 0;
+            ACTIVE_CONNECTIONS_COUNT.set(username, activeCount + 1);
+            if (activeCount === 0) {
+                const setOnlineTask = async () => {
+                    try {
+                        await env.DB.prepare("UPDATE users SET last_active = ? WHERE username = ?").bind(Date.now(), username).run();
+                    } catch (e) {}
+                };
+                if (ctx) ctx.waitUntil(setOnlineTask());
+                else setOnlineTask();
+            }
 
             try {
                 let offset = 17;
@@ -1548,19 +1594,19 @@ const htmlTemplate = `
             <div class="flex flex-col sm:flex-row sm:items-center gap-3">
                 <h1 class="text-lg font-bold flex items-center gap-2" dir="ltr">
                     Teriak Panel 
-                    <span class="text-xs px-2 py-0.5 font-semibold bg-blue-100 text-blue-800 dark:bg-blue-900/30 dark:text-blue-400 rounded-full">v0.8</span>
+                    <span class="text-xs px-2 py-0.5 font-semibold bg-blue-100 text-blue-800 dark:bg-blue-900/30 dark:text-blue-400 rounded-full">v0.9</span>
                 </h1>
-                <div class="flex items-center gap-3 bg-gray-100 dark:bg-zinc-800/60 px-3 py-1.5 rounded-full border border-gray-200 dark:border-zinc-800/80 shadow-sm">
+                <div class="flex items-center gap-3 bg-gray-100 dark:bg-zinc-800/60 px-3 py-1.5 rounded-full border border-gray-200 dark:border-zinc-800/80 shadow-sm flex-shrink-0 w-fit">
                     <!-- GitHub Link -->
-                    <a href="https://github.com/AG-Morgan/Teriak-Panel" target="_blank" rel="noopener noreferrer" class="text-gray-700 dark:text-zinc-300 hover:text-black dark:hover:text-white transition-all transform hover:scale-125 duration-200" title="گیت‌هاب پروژه">
-                        <svg class="w-[22px] h-[22px]" viewBox="0 0 24 24" fill="currentColor">
+                    <a href="https://github.com/AG-Morgan/Teriak-Panel" target="_blank" rel="noopener noreferrer" class="text-gray-700 dark:text-zinc-300 hover:text-black dark:hover:text-white transition-all transform hover:scale-125 duration-200 flex-shrink-0" title="گیت‌هاب پروژه">
+                        <svg class="w-[22px] h-[22px] flex-shrink-0" viewBox="0 0 24 24" fill="currentColor">
                             <path fill-rule="evenodd" clip-rule="evenodd" d="M12 2C6.477 2 2 6.477 2 12c0 4.42 2.87 8.17 6.84 9.5.5.08.66-.23.66-.5v-1.69c-2.77.6-3.36-1.34-3.36-1.34-.46-1.16-1.11-1.47-1.11-1.47-.91-.62.07-.6.07-.6 1 .07 1.53 1.03 1.53 1.03.87 1.52 2.34 1.07 2.91.83.09-.65.35-1.09.63-1.34-2.22-.25-4.55-1.11-4.55-4.92 0-1.11.38-2 1.03-2.71-.1-.25-.45-1.29.1-2.64 0 0 .84-.27 2.75 1.02.79-.22 1.65-.33 2.5-.33.85 0 1.71.11 2.5.33 1.91-1.29 2.75-1.02 2.75-1.02.55 1.35.2 2.39.1 2.64.65.71 1.03 1.6 1.03 2.71 0 3.82-2.34 4.66-4.57 4.91.36.31.69.92.69 1.85V21c0 .27.16.59.67.5C19.14 20.16 22 16.42 22 12A10 10 0 0012 2z"/>
                         </svg>
                     </a>
-                    <span class="w-px h-4 bg-gray-300 dark:bg-zinc-700"></span>
+                    <span class="w-px h-4 bg-gray-300 dark:bg-zinc-700 flex-shrink-0"></span>
                     <!-- Telegram Link -->
-                    <a href="https://t.me/teriakvpn" target="_blank" rel="noopener noreferrer" class="text-sky-500 hover:text-sky-600 dark:hover:text-sky-400 transition-all transform hover:scale-125 duration-200" title="کانال تلگرام">
-                        <svg class="w-[22px] h-[22px]" viewBox="0 0 24 24" fill="currentColor">
+                    <a href="https://t.me/teriakvpn" target="_blank" rel="noopener noreferrer" class="text-sky-500 hover:text-sky-600 dark:hover:text-sky-400 transition-all transform hover:scale-125 duration-200 flex-shrink-0" title="کانال تلگرام">
+                        <svg class="w-[22px] h-[22px] flex-shrink-0" viewBox="0 0 24 24" fill="currentColor">
                             <path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm4.64 6.8c-.15 1.58-.8 5.42-1.13 7.19-.14.75-.42 1-.68 1.03-.58.05-1.02-.38-1.58-.75-.88-.58-1.38-.94-2.23-1.5-.99-.65-.35-1.01.22-1.59.15-.15 2.71-2.48 2.76-2.69a.2.2 0 00-.05-.18c-.06-.05-.14-.03-.21-.02-.09.02-1.49.94-4.22 2.79-.4.27-.76.41-1.08.4-.36-.01-1.04-.2-1.55-.37-.63-.2-1.12-.31-1.08-.66.02-.18.27-.36.74-.55 2.92-1.27 4.86-2.11 5.83-2.51 2.78-1.16 3.35-1.36 3.73-1.37.08 0 .27.02.39.12.1.08.13.19.14.27-.01.06.01.24 0 .24z"/>
                         </svg>
                     </a>
@@ -1954,8 +2000,10 @@ const htmlTemplate = `
                 if (users.length === 0) {
                     loadingState.classList.add('hidden');
                     emptyState.classList.remove('hidden');
+                    tableContainer.classList.add('hidden');
                 } else {
-                                        tbody.innerHTML = users.map(user => {
+                    emptyState.classList.add('hidden');
+                    tbody.innerHTML = users.map(user => {
                         const createdDate = user.created_at ? new Date(user.created_at).toLocaleDateString('fa-IR') : '-';
                         
                         // محاسبه روزهای باقی‌مانده و درصد آن
@@ -2036,31 +2084,31 @@ const htmlTemplate = `
                                             (user.is_online === 1 ? '<span class="px-1.5 py-0.5 text-[10px] font-medium bg-emerald-500 text-white rounded-md animate-pulse">● آنلاین</span>' : '<span class="px-1.5 py-0.5 text-[10px] font-medium bg-gray-200 text-gray-600 dark:bg-zinc-800 dark:text-zinc-400 rounded-md">آفلاین</span>') +
                                         '</div>' +
                                         '<div class="flex gap-1.5">' +
-                                            '<button onclick="copyConfig(\\'' + user.username + '\\')" title="کپی کانفیگ" class="p-1.5 bg-white dark:bg-zinc-800 border border-gray-200 dark:border-zinc-700 hover:bg-blue-50 dark:hover:bg-blue-900/30 text-blue-600 dark:text-blue-400 rounded-md transition shadow-sm"><svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z"></path></svg></button>' +
-                                            '<button onclick="copyJsonConfig(\\'' + user.username + '\\')" title="کپی JSON" class="p-1.5 bg-white dark:bg-zinc-800 border border-gray-200 dark:border-zinc-700 hover:bg-purple-50 dark:hover:bg-purple-900/30 text-purple-600 dark:text-purple-400 rounded-md transition shadow-sm"><svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10 20l4-16m4 4l4 4-4 4M6 16l-4-4 4-4"></path></svg></button>' +
-                                            '<button onclick="showQR(\\'' + user.username + '\\')" title="کد QR" class="p-1.5 bg-white dark:bg-zinc-800 border border-gray-200 dark:border-zinc-700 hover:bg-green-50 dark:hover:bg-green-900/30 text-green-600 dark:text-green-400 rounded-md transition shadow-sm"><svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v1m6 11h2m-6 0h-2v4m0-11v3m0 0h.01M12 12h4.01M16 20h4M4 12h4m12 0h.01M5 8h2a1 1 0 001-1V5a1 1 0 00-1-1H5a1 1 0 00-1 1v2a1 1 0 001 1zm14 0h2a1 1 0 001-1V5a1 1 0 00-1-1h-2a1 1 0 00-1 1v2a1 1 0 001 1zM5 20h2a1 1 0 001-1v-2a1 1 0 00-1-1H5a1 1 0 00-1 1v2a1 1 0 001 1z"></path></svg></button>' +
-                                            '<button onclick="editUser(\\'' + user.username + '\\')" title="ویرایش" class="p-1.5 bg-white dark:bg-zinc-800 border border-gray-200 dark:border-zinc-700 hover:bg-yellow-50 dark:hover:bg-yellow-900/30 text-yellow-600 dark:text-yellow-400 rounded-md transition shadow-sm"><svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z"></path></svg></button>' +
-                                            '<button onclick="deleteUser(\\'' + user.username + '\\')" title="حذف" class="p-1.5 bg-white dark:bg-zinc-800 border border-gray-200 dark:border-zinc-700 hover:bg-red-50 dark:hover:bg-red-900/30 text-red-600 dark:text-red-400 rounded-md transition shadow-sm"><svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"></path></svg></button>' +
+                                            '<button onclick="copyConfig(\\'' + encodeURIComponent(user.username) + '\\')" title="کپی کانفیگ" class="p-1.5 bg-white dark:bg-zinc-800 border border-gray-200 dark:border-zinc-700 hover:bg-blue-50 dark:hover:bg-blue-900/30 text-blue-600 dark:text-blue-400 rounded-md transition shadow-sm"><svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z"></path></svg></button>' +
+                                            '<button onclick="copyJsonConfig(\\'' + encodeURIComponent(user.username) + '\\')" title="کپی JSON" class="p-1.5 bg-white dark:bg-zinc-800 border border-gray-200 dark:border-zinc-700 hover:bg-purple-50 dark:hover:bg-purple-900/30 text-purple-600 dark:text-purple-400 rounded-md transition shadow-sm"><svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10 20l4-16m4 4l4 4-4 4M6 16l-4-4 4-4"></path></svg></button>' +
+                                            '<button onclick="showQR(\\'' + encodeURIComponent(user.username) + '\\')" title="کد QR" class="p-1.5 bg-white dark:bg-zinc-800 border border-gray-200 dark:border-zinc-700 hover:bg-green-50 dark:hover:bg-green-900/30 text-green-600 dark:text-green-400 rounded-md transition shadow-sm"><svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v1m6 11h2m-6 0h-2v4m0-11v3m0 0h.01M12 12h4.01M16 20h4M4 12h4m12 0h.01M5 8h2a1 1 0 001-1V5a1 1 0 00-1-1H5a1 1 0 00-1 1v2a1 1 0 001 1zm14 0h2a1 1 0 001-1V5a1 1 0 00-1-1h-2a1 1 0 00-1 1v2a1 1 0 001 1zM5 20h2a1 1 0 001-1v-2a1 1 0 00-1-1H5a1 1 0 00-1 1v2a1 1 0 001 1z"></path></svg></button>' +
+                                            '<button onclick="editUser(\\'' + encodeURIComponent(user.username) + '\\')" title="ویرایش" class="p-1.5 bg-white dark:bg-zinc-800 border border-gray-200 dark:border-zinc-700 hover:bg-yellow-50 dark:hover:bg-yellow-900/30 text-yellow-600 dark:text-yellow-400 rounded-md transition shadow-sm"><svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z"></path></svg></button>' +
+                                            '<button onclick="deleteUser(\\'' + encodeURIComponent(user.username) + '\\')" title="حذف" class="p-1.5 bg-white dark:bg-zinc-800 border border-gray-200 dark:border-zinc-700 hover:bg-red-50 dark:hover:bg-red-900/30 text-red-600 dark:text-red-400 rounded-md transition shadow-sm"><svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"></path></svg></button>' +
                                         '</div>' +
                                     '</div>' +
                                 '</td>' +
                                 '<td class="p-4">' +
                                     '<div class="flex flex-col gap-2 min-w-[140px]">' +
                                         '<div class="flex gap-1">' +
-                                            '<button onclick="copySubLink(\\'' + user.username + '\\')" class="flex-1 flex items-center justify-center gap-1.5 px-2 py-1.5 bg-indigo-50 dark:bg-indigo-900/30 text-indigo-600 dark:text-indigo-400 hover:bg-indigo-100 dark:hover:bg-indigo-900/50 rounded-lg text-xs font-bold transition border border-indigo-200 dark:border-indigo-800">' +
+                                            '<button onclick="copySubLink(\\'' + encodeURIComponent(user.username) + '\\')" class="flex-1 flex items-center justify-center gap-1.5 px-2 py-1.5 bg-indigo-50 dark:bg-indigo-900/30 text-indigo-600 dark:text-indigo-400 hover:bg-indigo-100 dark:hover:bg-indigo-900/50 rounded-lg text-xs font-bold transition border border-indigo-200 dark:border-indigo-800">' +
                                                 '<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13.828 10.172a4 4 0 00-5.656 0l-4 4a4 4 0 105.656 5.656l1.102-1.101m-.758-4.899a4 4 0 005.656 0l4-4a4 4 0 00-5.656-5.656l-1.1 1.1"></path></svg>' +
                                                 'ساب متنی' +
                                             '</button>' +
-                                            '<button onclick="showSubQR(\\'' + user.username + '\\', \\'normal\\')" title="QR ساب متنی" class="px-2 py-1.5 bg-indigo-50 dark:bg-indigo-900/30 text-indigo-600 dark:text-indigo-400 hover:bg-indigo-100 dark:hover:bg-indigo-900/50 rounded-lg text-xs font-bold transition border border-indigo-200 dark:border-indigo-800">' +
+                                            '<button onclick="showSubQR(\\'' + encodeURIComponent(user.username) + '\\', \\'normal\\')" title="QR ساب متنی" class="px-2 py-1.5 bg-indigo-50 dark:bg-indigo-900/30 text-indigo-600 dark:text-indigo-400 hover:bg-indigo-100 dark:hover:bg-indigo-900/50 rounded-lg text-xs font-bold transition border border-indigo-200 dark:border-indigo-800">' +
                                                 '<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v1m6 11h2m-6 0h-2v4m0-11v3m0 0h.01M12 12h4.01M16 20h4M4 12h4m12 0h.01M5 8h2a1 1 0 001-1V5a1 1 0 00-1-1H5a1 1 0 00-1 1v2a1 1 0 001 1zm14 0h2a1 1 0 001-1V5a1 1 0 00-1-1h-2a1 1 0 00-1 1v2a1 1 0 001 1zM5 20h2a1 1 0 001-1v-2a1 1 0 00-1-1H5a1 1 0 00-1 1v2a1 1 0 001 1z"></path></svg>' +
                                             '</button>' +
                                         '</div>' +
                                         '<div class="flex gap-1">' +
-                                            '<button onclick="copyJsonSubLink(\\'' + user.username + '\\')" class="flex-1 flex items-center justify-center gap-1.5 px-2 py-1.5 bg-purple-50 dark:bg-purple-900/30 text-purple-600 dark:text-purple-400 hover:bg-purple-100 dark:hover:bg-purple-900/50 rounded-lg text-xs font-bold transition border border-purple-200 dark:border-purple-800">' +
+                                            '<button onclick="copyJsonSubLink(\\'' + encodeURIComponent(user.username) + '\\')" class="flex-1 flex items-center justify-center gap-1.5 px-2 py-1.5 bg-purple-50 dark:bg-purple-900/30 text-purple-600 dark:text-purple-400 hover:bg-purple-100 dark:hover:bg-purple-900/50 rounded-lg text-xs font-bold transition border border-purple-200 dark:border-purple-800">' +
                                                 '<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10 20l4-16m4 4l4 4-4 4M6 16l-4-4 4-4"></path></svg>' +
                                                 'ساب JSON' +
                                             '</button>' +
-                                            '<button onclick="showSubQR(\\'' + user.username + '\\', \\'json\\')" title="QR ساب JSON" class="px-2 py-1.5 bg-purple-50 dark:bg-purple-900/30 text-purple-600 dark:text-purple-400 hover:bg-purple-100 dark:hover:bg-purple-900/50 rounded-lg text-xs font-bold transition border border-purple-200 dark:border-purple-800">' +
+                                            '<button onclick="showSubQR(\\'' + encodeURIComponent(user.username) + '\\', \\'json\\')" title="QR ساب JSON" class="px-2 py-1.5 bg-purple-50 dark:bg-purple-900/30 text-purple-600 dark:text-purple-400 hover:bg-purple-100 dark:hover:bg-purple-900/50 rounded-lg text-xs font-bold transition border border-purple-200 dark:border-purple-800">' +
                                                 '<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v1m6 11h2m-6 0h-2v4m0-11v3m0 0h.01M12 12h4.01M16 20h4M4 12h4m12 0h.01M5 8h2a1 1 0 001-1V5a1 1 0 00-1-1H5a1 1 0 00-1 1v2a1 1 0 001 1zm14 0h2a1 1 0 001-1V5a1 1 0 00-1-1h-2a1 1 0 00-1 1v2a1 1 0 001 1zM5 20h2a1 1 0 001-1v-2a1 1 0 00-1-1H5a1 1 0 00-1 1v2a1 1 0 001 1z"></path></svg>' +
                                             '</button>' +
                                         '</div>' +
@@ -2167,18 +2215,19 @@ const htmlTemplate = `
                 if (ips.length > 0) cleanIp = ips[0];
             }
             const tlsVal = user.tls === 'on' ? 'tls' : 'none';
-            return 'vle' + 'ss://' + (user.uuid || '') + '@' + cleanIp + ':' + user.port + '?path=%2F&security=' + tlsVal + '&encryption=none&insecure=0&host=' + host + '&fp=chrome&type=ws&allowInsecure=0&sni=' + host + '#' + username;
+            return 'vle' + 'ss://' + (user.uuid || '') + '@' + cleanIp + ':' + user.port + '?path=%2F&security=' + tlsVal + '&encryption=none&insecure=0&host=' + host + '&fp=chrome&type=ws&allowInsecure=0&sni=' + host + '#' + encodeURIComponent(username);
         }
 
         function getSubLink(username) {
-            return window.location.origin + '/feed/' + username;
+            return window.location.origin + '/feed/' + encodeURIComponent(username);
         }
 
         function getJsonSubLink(username) {
-            return window.location.origin + '/feed/json/' + username;
+            return window.location.origin + '/feed/json/' + encodeURIComponent(username);
         }
 
-        function copySubLink(username) {
+        function copySubLink(encodedUsername) {
+            const username = decodeURIComponent(encodedUsername);
             navigator.clipboard.writeText(getSubLink(username)).then(function() {
                 alert('✅ لینک ساب متنی با موفقیت کپی شد!');
             }).catch(function() {
@@ -2186,7 +2235,8 @@ const htmlTemplate = `
             });
         }
 
-        function copyJsonSubLink(username) {
+        function copyJsonSubLink(encodedUsername) {
+            const username = decodeURIComponent(encodedUsername);
             navigator.clipboard.writeText(getJsonSubLink(username)).then(function() {
                 alert('✅ لینک ساب JSON با موفقیت کپی شد!');
             }).catch(function() {
@@ -2194,7 +2244,8 @@ const htmlTemplate = `
             });
         }
 
-        function showSubQR(username, type) {
+        function showSubQR(encodedUsername, type) {
+            const username = decodeURIComponent(encodedUsername);
             if (type === 'normal') {
                 toggleQRModal(true, getSubLink(username), 'QR ساب متنی');
             } else if (type === 'json') {
@@ -2202,7 +2253,8 @@ const htmlTemplate = `
             }
         }
 
-        function copyConfig(username) {
+        function copyConfig(encodedUsername) {
+            const username = decodeURIComponent(encodedUsername);
             const link = getVlessLink(username);
             if (!link) return;
             navigator.clipboard.writeText(link).then(function() {
@@ -2212,7 +2264,8 @@ const htmlTemplate = `
             });
         }
 
-        function copyJsonConfig(username) {
+        function copyJsonConfig(encodedUsername) {
+            const username = decodeURIComponent(encodedUsername);
             const user = window.allUsers.find(function(u) { return u.username === username; });
             if (!user) return;
             const host = window.location.hostname;
@@ -2434,13 +2487,15 @@ const htmlTemplate = `
             });
         }
 
-        function showQR(username) {
+        function showQR(encodedUsername) {
+            const username = decodeURIComponent(encodedUsername);
             const link = getVlessLink(username);
             if (!link) return;
             toggleQRModal(true, link, 'QR کانفیگ VLESS');
         }
 
-        function editUser(username) {
+        function editUser(encodedUsername) {
+            const username = decodeURIComponent(encodedUsername);
             const user = window.allUsers.find(u => u.username === username);
             if (!user) {
                 alert('کاربر یافت نشد!');
@@ -2470,7 +2525,8 @@ const htmlTemplate = `
             toggleModal(true);
         }
 
-        async function deleteUser(username) {
+        async function deleteUser(encodedUsername) {
+            const username = decodeURIComponent(encodedUsername);
             if (confirm('آیا از حذف کاربر ' + username + ' مطمئن هستید؟')) {
                 try {
                     const response = await fetch(\`/api/users/\${encodeURIComponent(username)}\`, {
