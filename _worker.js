@@ -3,45 +3,26 @@ import { connect } from 'cloudflare:sockets';
 export default {
     async fetch(request, env, ctx) {
     await ensureSchema(env.DB);
+
     const url = new URL(request.url);
     
     const upgradeHeader = (request.headers.get('Upgrade') || '').toLowerCase();
-    if (upgradeHeader === 'websocket') {
-      const pathUsername = url.pathname.slice(1);
-      if (pathUsername && pathUsername !== 'api/users') {
+    if (upgradeHeader === 'websocket' && url.pathname === '/') {
+      try {
+        let proxyIP = "proxyip.cmliussss.net";
         try {
-          const user = await env.DB.prepare("SELECT * FROM users WHERE username = ?").bind(pathUsername).first();
-          if (user && user.connection_type === atob('dmxlc3M=')) {
-            if (user.is_active === 0) {
-              return new Response("Quota Exceeded / Disabled", { status: 403 });
-            }
-            if (user.limit_gb && user.used_gb >= user.limit_gb) {
-              return new Response("Quota Exceeded", { status: 403 });
-            }
-            if (user.expiry_days && user.created_at) {
-              const created = new Date(user.created_at);
-              const expiryDate = new Date(created.getTime() + (user.expiry_days * 24 * 60 * 60 * 1000));
-              if (new Date() > expiryDate) {
-                return new Response("Subscription Expired", { status: 403 });
-              }
-            }
-                                    let proxyIP = "proxyip.cmliussss.net";
-            try {
-              const proxyRow = await env.DB.prepare("SELECT value FROM settings WHERE key = 'proxy_ip'").first();
-              if (proxyRow && proxyRow.value) {
-                proxyIP = proxyRow.value;
-              }
-            } catch (e) {}
-
-            const mockStoredData = {
-              uuid: user.uuid,
-              proxy_ip: proxyIP
-            };
-            return handleVLESS(request, env, mockStoredData, ctx);
+          const proxyRow = await env.DB.prepare("SELECT value FROM settings WHERE key = 'proxy_ip'").first();
+          if (proxyRow && proxyRow.value) {
+            proxyIP = proxyRow.value;
           }
-        } catch (e) {
-          // Silently proceed
-        }
+        } catch (e) {}
+
+        const mockStoredData = {
+          proxy_ip: proxyIP
+        };
+        return handleVLESS(request, env, mockStoredData, ctx);
+      } catch (e) {
+        // Silently proceed
       }
     }
 
@@ -57,7 +38,7 @@ export default {
       if (isFeedPath && subUser.startsWith('json/')) {
         subUser = subUser.slice(5);
         try {
-          const user = await env.DB.prepare("SELECT * FROM users WHERE username = ?").bind(subUser).first();
+          const user = await env.DB.prepare("SELECT * FROM users WHERE username = ? OR uuid = ?").bind(subUser, subUser).first();
           if (user && user.connection_type === atob('dmxlc3M=')) {
             const host = url.hostname;
             let ips = [host];
@@ -118,7 +99,7 @@ export default {
                     },
                     ["stream" + "Settings"]: {
                       network: "ws",
-                      ["ws" + "Settings"]: { host: host, path: "/" + subUser },
+                      ["ws" + "Settings"]: { host: host, path: "/" },
                       security: tlsVal,
                       sockopt: { ["dialer" + "Proxy"]: "fragment" }
                     },
@@ -183,7 +164,7 @@ export default {
       } else {
         // هندلر ساب متنی مخدوش‌شده با ترفند تزریق نویز
         try {
-          const user = await env.DB.prepare("SELECT * FROM users WHERE username = ?").bind(subUser).first();
+          const user = await env.DB.prepare("SELECT * FROM users WHERE username = ? OR uuid = ?").bind(subUser, subUser).first();
           if (user && user.connection_type === atob('dmxlc3M=')) {
             const host = url.hostname;
             let ips = [host];
@@ -194,7 +175,7 @@ export default {
             const tlsVal = user.tls === 'on' ? 'tls' : 'none';
             const links = ips.map((ip, index) => {
               const remark = ips.length > 1 ? user.username + '-' + (index + 1) : user.username;
-              return atob('dmxlc3M6Ly8=') + user.uuid + '@' + ip + ':' + user.port + '?path=%2F' + user.username + '&security=' + tlsVal + '&encryption=none&insecure=0&host=' + host + '&fp=chrome&type=ws&allowInsecure=0&sni=' + host + '#' + encodeURIComponent(remark);
+              return atob('dmxlc3M6Ly8=') + user.uuid + '@' + ip + ':' + user.port + '?path=%2F&security=' + tlsVal + '&encryption=none&insecure=0&host=' + host + '&fp=chrome&type=ws&allowInsecure=0&sni=' + host + '#' + encodeURIComponent(remark);
             });
             
             // تزریق نویز تصادفی برای تغییر امضای تکراری بیس۶۴ ساب‌ها و شکستن شناسایی DPI
@@ -410,7 +391,7 @@ export default {
           await env.DB.prepare(
             "UPDATE users SET limit_gb = ?, expiry_days = ?, ips = ?, tls = ?, port = ? WHERE username = ?"
           ).bind(
-            limit_gb ? parseInt(limit_gb) : null, 
+            limit_gb ? parseFloat(limit_gb) : null, 
             expiry_days ? parseInt(expiry_days) : null, 
             ips || null, 
             tls, 
@@ -455,30 +436,19 @@ export default {
             // API GET: دریافت لیست کاربران از دیتابیس D1
       if (url.pathname === '/api/users' && request.method === 'GET') {
         try {
+          const now = Date.now();
+          await env.DB.prepare("UPDATE users SET is_online = CASE WHEN last_active IS NOT NULL AND (? - last_active) < 60000 THEN 1 ELSE 0 END").bind(now).run();
           const { results } = await env.DB.prepare("SELECT * FROM users ORDER BY id DESC").all();
-          const liveUsage = await getLiveUsage(env);
-          let totalTodayRequests = 0;
-          if (liveUsage && liveUsage.has("__total_today_requests__")) {
-            totalTodayRequests = liveUsage.get("__total_today_requests__").count;
-          }
-                    const updatedResults = (results || []).map(user => {
-            let liveGb = user.used_gb || 0;
-            let reqCount = 0;
-            if (liveUsage && liveUsage.has(user.username)) {
-              const uData = liveUsage.get(user.username);
-              liveGb = Math.max(liveGb, uData.gb);
-              reqCount = uData.count;
-            }
-            return { ...user, used_gb: liveGb, req_count: reqCount };
-          });
           const jsonResponse = JSON.stringify({
-            users: updatedResults,
-            totalTodayRequests: totalTodayRequests
+            users: results || [],
+            totalTodayRequests: 0,
+            serverTime: Date.now()
           });
           return new Response(jsonResponse, {
             headers: { 
               "Content-Type": "application/json; charset=utf-8",
-              "Access-Control-Allow-Origin": "*"
+              "Access-Control-Allow-Origin": "*",
+              "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0"
             }
           });
         } catch (err) {
@@ -509,7 +479,7 @@ export default {
           ).bind(
             username, 
             uuid,
-            limit_gb ? parseInt(limit_gb) : null, 
+            limit_gb ? parseFloat(limit_gb) : null, 
             expiry_days ? parseInt(expiry_days) : null, 
             ips || null, 
             atob('dmxlc3M='), 
@@ -537,14 +507,6 @@ export default {
     return new Response(htmlNginxTemplate, {
       headers: { "Content-Type": "text/html; charset=utf-8" }
     });
-  },
-  async scheduled(event, env, ctx) {
-    await ensureSchema(env.DB);
-    if (event.cron === "0 0 * * *") {
-      ctx.waitUntil(saveDailyUsageToD1(env));
-    } else {
-      ctx.waitUntil(checkAndDisconnectUsers(env));
-    }
   }
 };
 
@@ -1014,7 +976,7 @@ async function waitForBackpressure(ws) {
     }
 }
 
-async function connectStreams(remoteSocket, webSocket, headerData, retryFunc) {
+async function connectStreams(remoteSocket, webSocket, headerData, retryFunc, onBytes) {
     let header = headerData, hasData = false, reader, useBYOB = false;
     const BYOB_LIMIT = 64 * 1024;
     const downstreamSender = createDownstreamSender(webSocket, header);
@@ -1035,6 +997,7 @@ async function connectStreams(remoteSocket, webSocket, headerData, retryFunc) {
                 if (done) break;
                 if (!value || value.byteLength === 0) continue;
                 hasData = true;
+                if (typeof onBytes === 'function') onBytes(value.byteLength);
                 await downstreamSender.send(value);
             }
         } else {
@@ -1045,6 +1008,7 @@ async function connectStreams(remoteSocket, webSocket, headerData, retryFunc) {
                 if (done) break;
                 if (!value || value.byteLength === 0) continue;
                 hasData = true;
+                if (typeof onBytes === 'function') onBytes(value.byteLength);
                 if (value.byteLength >= DOWNSTREAM_GRAIN_BYTES) {
                     await downstreamSender.flush();
                     await downstreamSender.sendDirect(value);
@@ -1170,41 +1134,125 @@ async function handleVLESS(request, env, storedData = null, ctx = null) {
     serverSock.accept();
     serverSock.binaryType = 'arraybuffer';
 
+    let sessionBytes = 0;
+    let base_used_gb = 0;
+    let limit_gb = null;
+    let username = null;
+    const THRESHOLD = 50 * 1024 * 1024; // 50MB
+    let lastDataTime = Date.now();
+    let tickCount = 0;
+    let validUUID = null;
+
+    async function commitBytes(force = false) {
+        if (sessionBytes <= 0 || !username) return;
+        if (!force && sessionBytes < THRESHOLD) return;
+
+        const deltaGb = sessionBytes / (1024 * 1024 * 1024);
+        const bytesToCommit = sessionBytes;
+        sessionBytes = 0;
+
+        try {
+            await env.DB.prepare("UPDATE users SET used_gb = used_gb + ? WHERE username = ?").bind(deltaGb, username).run();
+            base_used_gb += deltaGb;
+        } catch (e) {
+            sessionBytes += bytesToCommit;
+        }
+    }
+
+    async function addBytes(bytes) {
+        if (bytes <= 0) return;
+        sessionBytes += bytes;
+
+        if (sessionBytes >= THRESHOLD) {
+            if (ctx) {
+                ctx.waitUntil(commitBytes(false));
+            } else {
+                await commitBytes(false);
+            }
+        }
+    }
+
     let isOfflineSet = false;
     const setOffline = () => {
         if (isOfflineSet) return;
         isOfflineSet = true;
-        const uuidToUpdate = storedData?.uuid;
+        const uuidToUpdate = validUUID;
         if (!uuidToUpdate) return;
-        const query = env.DB.prepare("UPDATE users SET last_active = 0 WHERE uuid = ?").bind(uuidToUpdate);
+        const query = env.DB.prepare("UPDATE users SET is_online = 0 WHERE uuid = ?").bind(uuidToUpdate);
+        
+        const runOfflineTasks = async () => {
+            try {
+                await query.run();
+            } catch (e) {}
+            if (sessionBytes > 0 && username) {
+                const deltaGb = sessionBytes / (1024 * 1024 * 1024);
+                sessionBytes = 0;
+                try {
+                    await env.DB.prepare("UPDATE users SET used_gb = used_gb + ? WHERE username = ?").bind(deltaGb, username).run();
+                } catch (e) {}
+            }
+        };
+
         if (ctx) {
-            ctx.waitUntil(query.run().catch(() => {}));
+            ctx.waitUntil(runOfflineTasks());
         } else {
-            query.run().catch(() => {});
+            runOfflineTasks();
         }
     };
 
-                const heartbeat = setInterval(async () => {
+    const heartbeat = setInterval(async () => {
         if (serverSock.readyState === WebSocket.OPEN) {
             try {
-                let user;
-                try {
-                    user = await env.DB.prepare("UPDATE users SET last_active = ? WHERE uuid = ? RETURNING is_active").bind(Date.now(), validUUID).first();
-                } catch (err) {
-                    await env.DB.prepare("UPDATE users SET last_active = ? WHERE uuid = ?").bind(Date.now(), validUUID).run();
-                    user = await env.DB.prepare("SELECT is_active FROM users WHERE uuid = ?").bind(validUUID).first();
-                }
-                if (!user || user.is_active === 0) {
-                    clearInterval(heartbeat);
-                    closeSocketQuietly(serverSock);
-                    return;
-                }
+                // ارسال پینگ نگهدارنده به کلاینت در هر ۱۵ ثانیه
                 serverSock.send(new Uint8Array(0));
+                
+                if (!validUUID) return;
+                
+                tickCount++;
+                // هر ۴ تیک ۱۵ ثانیه‌ای معادل ۶۰ ثانیه می‌شود
+                if (tickCount >= 4) {
+                    tickCount = 0;
+                    
+                    // بررسی وضعیت آنلاین بودن در رم ورکر بر اساس دیتای دریافتی در ۶۰ ثانیه اخیر
+                    const currentLocalOnline = (Date.now() - lastDataTime) < 60000;
+                    
+                    // خواندن وضعیت کاربر از دیتابیس برای کنترل حجم و زمان
+                    const user = await env.DB.prepare("SELECT is_active, is_online, limit_gb, used_gb, expiry_days, created_at FROM users WHERE uuid = ?").bind(validUUID).first();
+                    
+                    let isExpired = false;
+                    if (!user || user.is_active === 0) {
+                        isExpired = true;
+                    } else {
+                        if (user.limit_gb && user.used_gb >= user.limit_gb) {
+                            isExpired = true;
+                        }
+                        if (user.expiry_days && user.created_at) {
+                            const created = new Date(user.created_at);
+                            const expiryDate = new Date(created.getTime() + (user.expiry_days * 24 * 60 * 60 * 1000));
+                            if (new Date() > expiryDate) {
+                                isExpired = true;
+                            }
+                        }
+                    }
+
+                    if (isExpired) {
+                        await env.DB.prepare("UPDATE users SET is_active = 0, is_online = 0 WHERE uuid = ?").bind(validUUID).run();
+                        clearInterval(heartbeat);
+                        closeSocketQuietly(serverSock);
+                        return;
+                    }
+
+                    const targetOnlineVal = currentLocalOnline ? 1 : 0;
+                    // اگر وضعیت جدید در حافظه ورکر با مقدار دیتابیس متفاوت بود، مقدار دیتابیس آپدیت می‌شود
+                    if (user.is_online !== targetOnlineVal) {
+                        await env.DB.prepare("UPDATE users SET is_online = ?, last_active = ? WHERE uuid = ?").bind(targetOnlineVal, Date.now(), validUUID).run();
+                    }
+                }
             } catch (e) {}
         } else {
             clearInterval(heartbeat);
         }
-    }, 30000);
+    }, 15000);
 
     let remoteConnWrapper = { socket: null, connectingPromise: null, retryConnect: null };
     let reqUUID = null;
@@ -1212,12 +1260,7 @@ async function handleVLESS(request, env, storedData = null, ctx = null) {
     let isDnsQuery = false;
     let chunkBuffer = new Uint8Array(0);
 
-        const validUUID = storedData.uuid;
-    const proxyIP = storedData.proxy_ip;
-
-    try {
-        await env.DB.prepare("UPDATE users SET last_active = ? WHERE uuid = ?").bind(Date.now(), validUUID).run();
-    } catch (e) {}
+    const proxyIP = storedData?.proxy_ip || "proxyip.cmliussss.net";
 
     let wsChain = Promise.resolve();
     let wsStopped = false, wsFailed = false, wsFinished = false;
@@ -1263,6 +1306,11 @@ async function handleVLESS(request, env, storedData = null, ctx = null) {
     };
 
     const processWsMessage = async (chunk) => {
+        const bytes = chunk.byteLength || 0;
+        await addBytes(bytes);
+        
+        lastDataTime = Date.now();
+
         if (isDnsQuery) {
             await forwardVlessUDP(chunk, serverSock, null);
             return;
@@ -1275,10 +1323,42 @@ async function handleVLESS(request, env, storedData = null, ctx = null) {
             if (chunkBuffer.byteLength < 24) return;
 
             reqUUID = extractUUIDFromVless(chunkBuffer);
-            if (!reqUUID || reqUUID !== validUUID) {
+            if (!reqUUID) {
                 serverSock.close();
                 return;
             }
+
+            let user = null;
+            try {
+                user = await env.DB.prepare("SELECT * FROM users WHERE uuid = ?").bind(reqUUID).first();
+            } catch (e) {}
+
+            if (!user || user.is_active === 0) {
+                serverSock.close();
+                return;
+            }
+
+            if (user.limit_gb && user.used_gb >= user.limit_gb) {
+                serverSock.close();
+                return;
+            }
+
+            if (user.expiry_days && user.created_at) {
+                const created = new Date(user.created_at);
+                const expiryDate = new Date(created.getTime() + (user.expiry_days * 24 * 60 * 60 * 1000));
+                if (new Date() > expiryDate) {
+                    try {
+                        await env.DB.prepare("UPDATE users SET is_active = 0, is_online = 0 WHERE uuid = ?").bind(reqUUID).run();
+                    } catch (e) {}
+                    serverSock.close();
+                    return;
+                }
+            }
+
+            validUUID = reqUUID;
+            username = user.username;
+            limit_gb = user.limit_gb;
+            base_used_gb = user.used_gb || 0;
 
             isHeaderParsed = true;
 
@@ -1333,7 +1413,9 @@ async function handleVLESS(request, env, storedData = null, ctx = null) {
                         }
                         remoteConnWrapper.socket = s; 
                         s.closed.catch(() => {}).finally(() => closeSocketQuietly(serverSock));
-                        connectStreams(s, serverSock, respHeader, null);
+                        connectStreams(s, serverSock, respHeader, null, (b) => {
+                            addBytes(b);
+                        });
                     })();
                     remoteConnWrapper.connectingPromise = task;
                     try {
@@ -1463,7 +1545,27 @@ const htmlTemplate = `
         <!-- هدر پنل -->
     <header class="border-b border-gray-200 dark:border-amoled-border bg-white dark:bg-amoled-card px-4 py-4">
         <div class="max-w-6xl mx-auto flex justify-between items-center">
-            <h1 class="text-lg font-bold">Teriak Panel <span class="text-sm font-normal text-gray-400 dark:text-zinc-500">0.7</span></h1>
+            <div class="flex flex-col sm:flex-row sm:items-center gap-3">
+                <h1 class="text-lg font-bold flex items-center gap-2" dir="ltr">
+                    Teriak Panel 
+                    <span class="text-xs px-2 py-0.5 font-semibold bg-blue-100 text-blue-800 dark:bg-blue-900/30 dark:text-blue-400 rounded-full">v0.8</span>
+                </h1>
+                <div class="flex items-center gap-3 bg-gray-100 dark:bg-zinc-800/60 px-3 py-1.5 rounded-full border border-gray-200 dark:border-zinc-800/80 shadow-sm">
+                    <!-- GitHub Link -->
+                    <a href="https://github.com/AG-Morgan/Teriak-Panel" target="_blank" rel="noopener noreferrer" class="text-gray-700 dark:text-zinc-300 hover:text-black dark:hover:text-white transition-all transform hover:scale-125 duration-200" title="گیت‌هاب پروژه">
+                        <svg class="w-[22px] h-[22px]" viewBox="0 0 24 24" fill="currentColor">
+                            <path fill-rule="evenodd" clip-rule="evenodd" d="M12 2C6.477 2 2 6.477 2 12c0 4.42 2.87 8.17 6.84 9.5.5.08.66-.23.66-.5v-1.69c-2.77.6-3.36-1.34-3.36-1.34-.46-1.16-1.11-1.47-1.11-1.47-.91-.62.07-.6.07-.6 1 .07 1.53 1.03 1.53 1.03.87 1.52 2.34 1.07 2.91.83.09-.65.35-1.09.63-1.34-2.22-.25-4.55-1.11-4.55-4.92 0-1.11.38-2 1.03-2.71-.1-.25-.45-1.29.1-2.64 0 0 .84-.27 2.75 1.02.79-.22 1.65-.33 2.5-.33.85 0 1.71.11 2.5.33 1.91-1.29 2.75-1.02 2.75-1.02.55 1.35.2 2.39.1 2.64.65.71 1.03 1.6 1.03 2.71 0 3.82-2.34 4.66-4.57 4.91.36.31.69.92.69 1.85V21c0 .27.16.59.67.5C19.14 20.16 22 16.42 22 12A10 10 0 0012 2z"/>
+                        </svg>
+                    </a>
+                    <span class="w-px h-4 bg-gray-300 dark:bg-zinc-700"></span>
+                    <!-- Telegram Link -->
+                    <a href="https://t.me/teriakvpn" target="_blank" rel="noopener noreferrer" class="text-sky-500 hover:text-sky-600 dark:hover:text-sky-400 transition-all transform hover:scale-125 duration-200" title="کانال تلگرام">
+                        <svg class="w-[22px] h-[22px]" viewBox="0 0 24 24" fill="currentColor">
+                            <path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm4.64 6.8c-.15 1.58-.8 5.42-1.13 7.19-.14.75-.42 1-.68 1.03-.58.05-1.02-.38-1.58-.75-.88-.58-1.38-.94-2.23-1.5-.99-.65-.35-1.01.22-1.59.15-.15 2.71-2.48 2.76-2.69a.2.2 0 00-.05-.18c-.06-.05-.14-.03-.21-.02-.09.02-1.49.94-4.22 2.79-.4.27-.76.41-1.08.4-.36-.01-1.04-.2-1.55-.37-.63-.2-1.12-.31-1.08-.66.02-.18.27-.36.74-.55 2.92-1.27 4.86-2.11 5.83-2.51 2.78-1.16 3.35-1.36 3.73-1.37.08 0 .27.02.39.12.1.08.13.19.14.27-.01.06.01.24 0 .24z"/>
+                        </svg>
+                    </a>
+                </div>
+            </div>
             <div class="flex items-center gap-3">
                 <!-- دکمه تغییر پوسته (Light / AMOLED Dark) -->
                 <button id="theme-toggle" class="p-2 rounded-lg bg-gray-100 dark:bg-amoled-input border border-gray-200 dark:border-amoled-border hover:bg-gray-200 dark:hover:bg-zinc-800 transition">
@@ -1544,23 +1646,20 @@ const htmlTemplate = `
             </div>
         </div>
 
-        <!-- کارت ۴: درخواست‌های امروز -->
-        <div class="bg-white dark:bg-amoled-card border border-gray-200 dark:border-amoled-border rounded-2xl p-6 shadow-sm flex items-center justify-between hover:shadow-md hover:border-rose-400 dark:hover:border-rose-500/50 transition duration-300 relative overflow-hidden group">
-            <div class="absolute -right-4 -bottom-4 w-24 h-24 bg-rose-500/10 rounded-full blur-xl group-hover:scale-150 transition duration-500"></div>
+        <!-- کارت ۴: پر مصرف‌ترین کاربر -->
+        <div class="bg-white dark:bg-amoled-card border border-gray-200 dark:border-amoled-border rounded-2xl p-6 shadow-sm flex items-center justify-between hover:shadow-md hover:border-amber-400 dark:hover:border-amber-500/50 transition duration-300 relative overflow-hidden group">
+            <div class="absolute -right-4 -bottom-4 w-24 h-24 bg-amber-500/10 rounded-full blur-xl group-hover:scale-150 transition duration-500"></div>
             <div class="space-y-2 relative z-10">
-                <span class="text-sm font-semibold text-gray-500 dark:text-zinc-400">درخواست‌های امروز (CF)</span>
-                <div class="text-3xl font-black text-rose-600 dark:text-rose-400 transition-all" id="stat-total-requests">0</div>
-                <span class="text-xs text-rose-500 dark:text-rose-400 flex items-center gap-1 font-medium">
-                    سقف رایگان: ۱۰۰,۰۰۰ درخواست
+                <span class="text-sm font-semibold text-gray-500 dark:text-zinc-400">پر مصرف‌ترین کاربر</span>
+                <div class="text-2xl font-black text-amber-600 dark:text-amber-400 transition-all truncate max-w-[150px]" id="stat-top-user">-</div>
+                <span class="text-xs text-amber-500 dark:text-amber-400 flex items-center gap-1 font-medium" id="stat-top-user-usage">
+                    ۰ GB مصرف شده
                 </span>
             </div>
-            <div class="relative flex items-center justify-center z-10">
-                <!-- دایره پیشرفت با SVG -->
-                <svg class="w-16 h-16 transform -rotate-90">
-                    <circle class="text-gray-100 dark:text-zinc-800" stroke-width="5" stroke="currentColor" fill="transparent" r="26" cx="32" cy="32"/>
-                    <circle class="text-rose-500 dark:text-rose-400 transition-all duration-700 ease-out" stroke-width="5" stroke-dasharray="163.36" stroke-dashoffset="163.36" id="request-progress-circle" stroke-linecap="round" stroke="currentColor" fill="transparent" r="26" cx="32" cy="32"/>
+            <div class="p-3 bg-amber-50 dark:bg-amber-950/30 text-amber-600 dark:text-amber-400 rounded-2xl relative z-10">
+                <svg class="w-8 h-8" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z"></path>
                 </svg>
-                <span class="absolute text-[10px] font-black text-rose-600 dark:text-rose-400" id="stat-requests-percent">0%</span>
             </div>
         </div>
     </div>
@@ -1607,13 +1706,13 @@ const htmlTemplate = `
                         <!-- فرم مودال -->
             <form id="create-user-form" class="p-6 space-y-4" onsubmit="handleFormSubmit(event)">
                 <div>
-                    <label class="block text-sm font-medium mb-1.5">نام کاربر (انگلیسی)</label>
-                    <input type="text" id="input-name" pattern="[A-Za-z0-9_]+" placeholder="مثلا: reza_vpn" class="w-full px-3 py-2 bg-gray-50 dark:bg-amoled-input border border-gray-300 dark:border-amoled-border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 text-sm" required>
+                    <label class="block text-sm font-medium mb-1.5">نام کاربر</label>
+                    <input type="text" id="input-name" placeholder="مثلا: علی یا reza_vpn" class="w-full px-3 py-2 bg-gray-50 dark:bg-amoled-input border border-gray-300 dark:border-amoled-border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 text-sm" required>
                 </div>
                 <div class="grid grid-cols-2 gap-4">
                     <div>
                         <label class="block text-sm font-medium mb-1.5">حجم مجاز (گیگابایت) <span class="text-xs text-gray-400 dark:text-zinc-500">(خالی = نامحدود)</span></label>
-                        <input type="number" id="input-limit" min="0" placeholder="مثلا: 50" class="w-full px-3 py-2 bg-gray-50 dark:bg-amoled-input border border-gray-300 dark:border-amoled-border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 text-sm">
+                        <input type="number" id="input-limit" min="0" step="any" placeholder="مثلا: 0.5 یا 50" class="w-full px-3 py-2 bg-gray-50 dark:bg-amoled-input border border-gray-300 dark:border-amoled-border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 text-sm">
                     </div>
                     <div>
                         <label class="block text-sm font-medium mb-1.5">مدت اعتبار (روز) <span class="text-xs text-gray-400 dark:text-zinc-500">(خالی = نامحدود)</span></label>
@@ -1800,48 +1899,27 @@ const htmlTemplate = `
             }
         });
 
-                // دریافت و نمایش کاربران از دیتابیس با کش Stale-While-Revalidate
-        async function loadUsers(forceFresh = false) {
+                // دریافت و نمایش کاربران از دیتابیس به صورت کاملاً زنده
+        async function loadUsers(silent = false) {
             const loadingState = document.getElementById('loading-state');
             const tableContainer = document.getElementById('users-table-container');
             const emptyState = document.getElementById('empty-state');
             
-            const cachedUsers = localStorage.getItem('cached_users_list');
-            let hasCachedData = false;
-            
-            if (cachedUsers && !forceFresh) {
-                try {
-                    const parsed = JSON.parse(cachedUsers);
-                    if (parsed && parsed.users) {
-                        renderUsersUI(parsed);
-                        hasCachedData = true;
-                    }
-                } catch (e) {
-                    console.error("Error reading cached users:", e);
-                }
-            }
-            
-            if (!hasCachedData) {
+            if (!silent) {
                 loadingState.classList.remove('hidden');
                 tableContainer.classList.add('hidden');
                 emptyState.classList.add('hidden');
-            } else {
-                tableContainer.classList.add('opacity-75');
             }
             
             try {
-                const res = await fetch('/api/users');
+                const res = await fetch('/api/users?t=' + Date.now());
                 if (!res.ok) throw new Error();
                 const data = await res.json();
-                
-                localStorage.setItem('cached_users_list', JSON.stringify(data));
                 renderUsersUI(data);
             } catch (err) {
-                if (!hasCachedData) {
+                if (!silent) {
                     loadingState.innerHTML = '<span class="text-red-500">خطا در دریافت لیست کاربران از سرور</span>';
                 }
-            } finally {
-                tableContainer.classList.remove('opacity-75');
             }
         }
 
@@ -1858,20 +1936,21 @@ const htmlTemplate = `
                 window.allUsers = users;
                 
                 // محاسبات آمارها جهت نمایش در ۴ باکس بالای پنل
+                const serverTime = data.serverTime || Date.now();
                 const totalUsersCount = users.length;
-                const activeUsersCount = users.filter(user => user.last_active && (Date.now() - user.last_active < 35000)).length;
+                const activeUsersCount = users.filter(user => user.is_online === 1).length;
                 const totalGbUsage = users.reduce((sum, user) => sum + (user.used_gb || 0), 0);
                 
                 document.getElementById('stat-total-users').innerText = totalUsersCount;
                 document.getElementById('stat-active-users').innerText = activeUsersCount;
                 document.getElementById('stat-total-usage').innerText = totalGbUsage < 1 ? (totalGbUsage * 1024).toFixed(0) + ' MB' : totalGbUsage.toFixed(2) + ' GB';
-                document.getElementById('stat-total-requests').innerText = totalTodayRequests.toLocaleString();
                 
-                const percent = Math.min(100, (totalTodayRequests / 100000) * 100);
-                const offset = 163.36 - (percent / 100) * 163.36;
-                document.getElementById('request-progress-circle').style.strokeDashoffset = offset;
-                document.getElementById('stat-requests-percent').innerText = percent.toFixed(1) + '%';
-                
+                // محاسبه زنده پرمصرف‌ترین کاربر از لیست دریافتی بدون نیاز به هیچ درخواست سروری جدید
+                const topUser = users.reduce((max, u) => (u.used_gb || 0) > (max.used_gb || 0) ? u : max, { username: 'هیچکدام', used_gb: 0 });
+                document.getElementById('stat-top-user').innerText = topUser.username;
+                const topUsage = topUser.used_gb || 0;
+                document.getElementById('stat-top-user-usage').innerText = topUsage < 1 ? (topUsage * 1024).toFixed(0) + ' MB مصرف شده' : topUsage.toFixed(2) + ' GB مصرف شده';
+
                 if (users.length === 0) {
                     loadingState.classList.add('hidden');
                     emptyState.classList.remove('hidden');
@@ -1886,7 +1965,7 @@ const htmlTemplate = `
                             if (user.created_at) {
                                 const created = new Date(user.created_at);
                                 const expiryDate = new Date(created.getTime() + (user.expiry_days * 24 * 60 * 60 * 1000));
-                                const diffDays = Math.ceil((expiryDate - new Date()) / (1000 * 60 * 60 * 24));
+                                const diffDays = Math.ceil((expiryDate - new Date(serverTime)) / (1000 * 60 * 60 * 24));
                                 daysRemaining = diffDays > 0 ? diffDays : 0;
                                 daysPercent = Math.max(0, Math.min(100, (daysRemaining / user.expiry_days) * 100));
                             } else {
@@ -1954,7 +2033,7 @@ const htmlTemplate = `
                                         '<div class="flex items-center gap-2">' +
                                             '<span class="font-bold text-gray-900 dark:text-zinc-100">' + user.username + '</span>' +
                                             (user.is_active === 0 ? '<span class="px-1.5 py-0.5 text-[10px] font-medium bg-red-100 text-red-800 dark:bg-red-900/30 dark:text-red-400 rounded-md">قطع</span>' : '<span class="px-1.5 py-0.5 text-[10px] font-medium bg-green-100 text-green-800 dark:bg-green-900/30 dark:text-green-400 rounded-md">فعال</span>') +
-                                            ((user.last_active && (Date.now() - user.last_active < 35000)) ? '<span class="px-1.5 py-0.5 text-[10px] font-medium bg-emerald-500 text-white rounded-md animate-pulse">● آنلاین</span>' : '<span class="px-1.5 py-0.5 text-[10px] font-medium bg-gray-200 text-gray-600 dark:bg-zinc-800 dark:text-zinc-400 rounded-md">آفلاین</span>') +
+                                            (user.is_online === 1 ? '<span class="px-1.5 py-0.5 text-[10px] font-medium bg-emerald-500 text-white rounded-md animate-pulse">● آنلاین</span>' : '<span class="px-1.5 py-0.5 text-[10px] font-medium bg-gray-200 text-gray-600 dark:bg-zinc-800 dark:text-zinc-400 rounded-md">آفلاین</span>') +
                                         '</div>' +
                                         '<div class="flex gap-1.5">' +
                                             '<button onclick="copyConfig(\\'' + user.username + '\\')" title="کپی کانفیگ" class="p-1.5 bg-white dark:bg-zinc-800 border border-gray-200 dark:border-zinc-700 hover:bg-blue-50 dark:hover:bg-blue-900/30 text-blue-600 dark:text-blue-400 rounded-md transition shadow-sm"><svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z"></path></svg></button>' +
@@ -2088,7 +2167,7 @@ const htmlTemplate = `
                 if (ips.length > 0) cleanIp = ips[0];
             }
             const tlsVal = user.tls === 'on' ? 'tls' : 'none';
-            return 'vle' + 'ss://' + (user.uuid || '') + '@' + cleanIp + ':' + user.port + '?path=%2F' + username + '&security=' + tlsVal + '&encryption=none&insecure=0&host=' + host + '&fp=chrome&type=ws&allowInsecure=0&sni=' + host + '#' + username;
+            return 'vle' + 'ss://' + (user.uuid || '') + '@' + cleanIp + ':' + user.port + '?path=%2F&security=' + tlsVal + '&encryption=none&insecure=0&host=' + host + '&fp=chrome&type=ws&allowInsecure=0&sni=' + host + '#' + username;
         }
 
         function getSubLink(username) {
@@ -2222,7 +2301,7 @@ const htmlTemplate = `
                     "network": "ws",
                     ["ws" + "Settings"]: {
                       "host": host,
-                      "path": "/" + username
+                      "path": "/"
                     },
                     "security": tlsVal,
                     "sockopt": {
@@ -2431,7 +2510,7 @@ const htmlTemplate = `
                 return (a.cca2 || '').localeCompare(b.cca2 || ''); 
             });
 
-            var html = '<option value="">🌐 پیش‌فرض (بدون لوکیشن)</option>';
+            var html = '<option value="">🌐 پیش‌فرض (لوکیشن خودکار)</option>';
             locations.forEach(function(loc) {
                 if (loc.iata && loc.city) {
                     var flag = getFlagEmoji(loc.cca2);
@@ -2554,6 +2633,11 @@ const htmlTemplate = `
         document.addEventListener('DOMContentLoaded', function() {
             loadUsers();
             loadLocations();
+            
+            // بروزرسانی خودکار و کاملاً زنده آمارهای آنلاین و ترافیک کاربران هر ۱ دقیقه یک‌بار در پس‌زمینه
+            setInterval(function() {
+                loadUsers(true);
+            }, 60000);
         });
     </script></body>
 </html>
@@ -2732,19 +2816,18 @@ Commercial support is available at
 
 let schemaEnsured = false;
 let cachedPanelPassword = null;
-let cachedLiveUsage = null;
-let lastLiveUsageFetch = 0;
+let lastDbCleanupTime = 0;
 
 async function ensureSchema(db) {
   if (schemaEnsured) return;
   try {
-    await db.prepare(`
-      CREATE TABLE IF NOT EXISTS users (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        username TEXT UNIQUE,
-        uuid TEXT,
-        limit_gb INTEGER,
-        expiry_days INTEGER,
+        await db.prepare(`
+          CREATE TABLE IF NOT EXISTS users (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            username TEXT UNIQUE,
+            uuid TEXT,
+            limit_gb REAL,
+            expiry_days INTEGER,
         ips TEXT,
         connection_type TEXT,
         tls TEXT,
@@ -2752,6 +2835,7 @@ async function ensureSchema(db) {
         used_gb REAL DEFAULT 0,
         is_active INTEGER DEFAULT 1,
         last_active INTEGER,
+        is_online INTEGER DEFAULT 0,
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
       )
     `).run();
@@ -2761,6 +2845,9 @@ async function ensureSchema(db) {
   } catch (e) {}
   try {
     await db.prepare("ALTER TABLE users ADD COLUMN last_active INTEGER").run();
+  } catch (e) {}
+  try {
+    await db.prepare("ALTER TABLE users ADD COLUMN is_online INTEGER DEFAULT 0").run();
   } catch (e) {}
     try {
     await db.prepare("CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT)").run();
@@ -2801,201 +2888,4 @@ async function sha256(message) {
   const hashBuffer = await crypto.subtle.digest('SHA-256', msgBuffer);
   const hashArray = Array.from(new Uint8Array(hashBuffer));
   return hashArray.map(b => b.toString(16).padStart(2, '0')).join('');
-}
-
-async function getLiveUsage(env, force = false) {
-  const apiToken = env.CF_API_TOKEN;
-  const accountId = env.CF_ACCOUNT_ID;
-  if (!apiToken || !accountId) {
-    return null;
-  }
-
-  const nowMs = Date.now();
-  if (!force && cachedLiveUsage && (nowMs - lastLiveUsageFetch < 30000)) {
-    return cachedLiveUsage;
-  }
-
-  const now = new Date();
-  const thirtyDaysAgo = new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000);
-  const startOfToday = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()));
-
-  const query = `
-    query GetUsage($accountTag: String!, $filter30d: AccountHttpRequestsAdaptiveGroupsFilter_Input!, $filter24h: AccountHttpRequestsAdaptiveGroupsFilter_Input!) {
-      viewer {
-        accounts(filter: { accountTag: $accountTag }) {
-          usage30d: httpRequestsAdaptiveGroups(
-            filter: $filter30d,
-            limit: 1000,
-            orderBy: [sum_edgeResponseBytes_DESC]
-          ) {
-            sum {
-              edgeResponseBytes
-            }
-            dimensions {
-              clientRequestPath
-            }
-          }
-          usage24h: httpRequestsAdaptiveGroups(
-            filter: $filter24h,
-            limit: 1000
-          ) {
-            count
-            dimensions {
-              clientRequestPath
-            }
-          }
-          accountTotal24h: httpRequestsAdaptiveGroups(
-            filter: $filter24h,
-            limit: 1
-          ) {
-            count
-          }
-        }
-      }
-    }
-  `;
-
-    const variables = {
-    accountTag: accountId,
-    filter30d: {
-      datetime_geq: thirtyDaysAgo.toISOString(),
-      datetime_lt: now.toISOString()
-    },
-    filter24h: {
-      datetime_geq: startOfToday.toISOString(),
-      datetime_lt: now.toISOString()
-    }
-  };
-
-  try {
-    const response = await fetch("https://api.cloudflare.com/client/v4/graphql", {
-      method: "POST",
-      headers: {
-        "Authorization": `Bearer ${apiToken}`,
-        "Content-Type": "application/json"
-      },
-      body: JSON.stringify({ query, variables })
-    });
-
-    if (response.ok) {
-      const resData = await response.json();
-      const usage30d = resData?.data?.viewer?.accounts?.[0]?.usage30d || [];
-      const usage24h = resData?.data?.viewer?.accounts?.[0]?.usage24h || [];
-      const accountTotal24h = resData?.data?.viewer?.accounts?.[0]?.accountTotal24h || [];
-      
-      const usageMap = new Map();
-      
-      for (const item of usage30d) {
-        const path = item.dimensions.clientRequestPath;
-        if (path && path.startsWith("/")) {
-          const username = path.slice(1);
-          if (username) {
-            const bytes = item.sum.edgeResponseBytes || 0;
-            const gb = bytes / (1024 * 1024 * 1024);
-            usageMap.set(username, {
-              gb: Math.round(gb * 10000) / 10000,
-              count: 0
-            });
-          }
-        }
-      }
-
-      for (const item of usage24h) {
-        const path = item.dimensions.clientRequestPath;
-        const count = item.count || 0;
-        if (path && path.startsWith("/")) {
-          const username = path.slice(1);
-          if (username) {
-            if (usageMap.has(username)) {
-              usageMap.get(username).count = count;
-            } else {
-              usageMap.set(username, {
-                gb: 0,
-                count: count
-              });
-            }
-          }
-        }
-      }
-
-            let totalTodayRequests = 0;
-      if (accountTotal24h && accountTotal24h.length > 0) {
-        totalTodayRequests = accountTotal24h[0].count || 0;
-      } else {
-        // Fallback: sum up the counts if accountTotal24h didn't return
-        for (const item of usage24h) {
-          totalTodayRequests += item.count || 0;
-        }
-      }
-
-      usageMap.set("__total_today_requests__", { gb: 0, count: totalTodayRequests });
-
-      cachedLiveUsage = usageMap;
-      lastLiveUsageFetch = nowMs;
-      return usageMap;
-    }
-  } catch (e) {
-    console.error("Error fetching live usage:", e);
-  }
-  return null;
-}
-
-async function checkAndDisconnectUsers(env) {
-  const liveUsage = await getLiveUsage(env);
-  const { results: users } = await env.DB.prepare("SELECT * FROM users").all();
-  if (users && users.length > 0) {
-    const statements = [];
-    for (const user of users) {
-      let usedGb = user.used_gb || 0;
-      if (liveUsage && liveUsage.has(user.username)) {
-        usedGb = Math.max(usedGb, liveUsage.get(user.username).gb);
-      }
-
-      let shouldBeActive = 1;
-
-      if (user.limit_gb && usedGb >= user.limit_gb) {
-        shouldBeActive = 0;
-      }
-
-      if (user.expiry_days && user.created_at) {
-        const created = new Date(user.created_at);
-        const expiryDate = new Date(created.getTime() + (user.expiry_days * 24 * 60 * 60 * 1000));
-        if (new Date() > expiryDate) {
-          shouldBeActive = 0;
-        }
-      }
-
-      if (user.is_active !== shouldBeActive || user.used_gb !== usedGb) {
-        statements.push(
-          env.DB.prepare("UPDATE users SET is_active = ?, used_gb = ? WHERE username = ?").bind(shouldBeActive, usedGb, user.username)
-        );
-      }
-    }
-
-    if (statements.length > 0) {
-      await env.DB.batch(statements);
-    }
-  }
-}
-
-async function saveDailyUsageToD1(env) {
-  const liveUsage = await getLiveUsage(env);
-  if (!liveUsage) return;
-
-  const { results: users } = await env.DB.prepare("SELECT username, used_gb FROM users").all();
-  if (users && users.length > 0) {
-    const statements = [];
-    for (const user of users) {
-      const uData = liveUsage.get(user.username);
-      if (uData !== undefined) {
-        const newGb = Math.max(user.used_gb || 0, uData.gb);
-        statements.push(
-          env.DB.prepare("UPDATE users SET used_gb = ? WHERE username = ?").bind(newGb, user.username)
-        );
-      }
-    }
-    if (statements.length > 0) {
-      await env.DB.batch(statements);
-    }
-  }
 }
