@@ -158,7 +158,9 @@ const Router = {
         is_active: user.is_active,
         created_at: user.created_at,
         tls: user.tls,
-        port: user.port
+        port: user.port,
+        ips: user.ips,
+        fingerprint: user.fingerprint || 'chrome'
       });
       const html = HTML_TEMPLATES.status.replace(
         "/* {{USER_DATA_PLACEHOLDER}} */",
@@ -320,15 +322,16 @@ const Router = {
             ).bind(username).run();
             return new Response(JSON.stringify({ success: true }), { headers: { "Content-Type": "application/json" } });
           } else {
-            const { limit_gb, expiry_days, ips, tls, port } = body;
+            const { limit_gb, expiry_days, ips, tls, port, fingerprint } = body;
             await env.DB.prepare(
-              "UPDATE users SET limit_gb = ?, expiry_days = ?, ips = ?, tls = ?, port = ? WHERE username = ?"
+              "UPDATE users SET limit_gb = ?, expiry_days = ?, ips = ?, tls = ?, port = ?, fingerprint = ? WHERE username = ?"
             ).bind(
               limit_gb ? parseFloat(limit_gb) : null, 
               expiry_days ? parseInt(expiry_days) : null, 
               ips || null, 
               tls, 
-              parseInt(port),
+              port, 
+              fingerprint || 'chrome',
               username
             ).run();
             return new Response(JSON.stringify({ success: true }), { headers: { "Content-Type": "application/json" } });
@@ -359,14 +362,14 @@ const Router = {
         }
 
         if (request.method === 'POST') {
-          const { username, limit_gb, expiry_days, ips, tls, port } = await request.json();
+          const { username, limit_gb, expiry_days, ips, tls, port, fingerprint } = await request.json();
           if (!username) {
             return new Response(JSON.stringify({ error: "نام کاربری اجباری است" }), { status: 400, headers: { "Content-Type": "application/json" } });
           }
           const uuid = crypto.randomUUID();
           try {
             await env.DB.prepare(
-              "INSERT INTO users (username, uuid, limit_gb, expiry_days, ips, connection_type, tls, port) VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
+              "INSERT INTO users (username, uuid, limit_gb, expiry_days, ips, connection_type, tls, port, fingerprint) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)"
             ).bind(
               username, 
               uuid,
@@ -375,7 +378,8 @@ const Router = {
               ips || null, 
               atob('dmxlc3M='), 
               tls, 
-              parseInt(port)
+              port,
+              fingerprint || 'chrome'
             ).run();
             return new Response(JSON.stringify({ success: true }), { headers: { "Content-Type": "application/json" } });
           } catch (err) {
@@ -423,6 +427,7 @@ const DbService = {
     } catch (e) {}
     try { await db.prepare("ALTER TABLE users ADD COLUMN is_active INTEGER DEFAULT 1").run(); } catch (e) {}
     try { await db.prepare("ALTER TABLE users ADD COLUMN last_active INTEGER").run(); } catch (e) {}
+    try { await db.prepare("ALTER TABLE users ADD COLUMN fingerprint TEXT DEFAULT 'chrome'").run(); } catch (e) {}
     try { await db.prepare("CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT)").run(); } catch (e) {}
     schemaEnsured = true;
   },
@@ -471,7 +476,9 @@ const SubscriptionService = {
       const parsedIps = user.ips.split('\n').map(ip => ip.trim()).filter(ip => ip.length > 0);
       if (parsedIps.length > 0) ips = parsedIps;
     }
-    const tlsVal = user.tls === 'on' ? 'tls' : 'none';
+    
+    const ports = String(user.port || '443').split(',').map(p => p.trim()).filter(p => p.length > 0);
+    const fp = user.fingerprint || 'chrome';
     
     let fragLen = "20-30";
     let fragInt = "1-2";
@@ -482,93 +489,98 @@ const SubscriptionService = {
       if (rowInt && rowInt.value) fragInt = rowInt.value;
     } catch(e) {}
 
-    const configArray = ips.map((ip, index) => {
-      const remark = ips.length > 1 ? `${user.username} - IP ${index + 1}` : `${user.username} - JSON Sub`;
-      
-      const configObj = {
-        remarks: remark,
-        version: { min: "25.10.15" },
-        log: { loglevel: "none" },
-        dns: {
-          servers: [
-            { address: "https://8.8.8.8/dns-query", tag: "remote-dns" },
-            { address: "8.8.8.8", domains: ["full:" + host], skipFallback: true }
+    const configArray = [];
+    ips.forEach((ip, ipIndex) => {
+      ports.forEach((portStr) => {
+        const isTlsPort = ['443', '2053', '2083', '2087', '2096', '8443'].includes(portStr);
+        const tlsVal = isTlsPort ? 'tls' : 'none';
+        const remark = ips.length > 1 ? `${user.username} - IP ${ipIndex + 1} - Port ${portStr}` : `${user.username} - Port ${portStr}`;
+        
+        const configObj = {
+          remarks: remark,
+          version: { min: "25.10.15" },
+          log: { loglevel: "none" },
+          dns: {
+            servers: [
+              { address: "https://8.8.8.8/dns-query", tag: "remote-dns" },
+              { address: "8.8.8.8", domains: ["full:" + host], skipFallback: true }
+            ],
+            queryStrategy: "UseIP",
+            tag: "dns"
+          },
+          inbounds: [
+            {
+              listen: "127.0.0.1", port: 10808, protocol: "socks",
+              settings: { auth: "noauth", udp: true },
+              sniffing: { destOverride: ["http", "tls"], enabled: true, routeOnly: true },
+              tag: "mixed-in"
+            },
+            {
+              listen: "127.0.0.1", port: 10853, protocol: "dokodemo-door",
+              settings: { address: "1.1.1.1", network: "tcp,udp", port: 53 },
+              tag: "dns-in"
+            }
           ],
-          queryStrategy: "UseIP",
-          tag: "dns"
-        },
-        inbounds: [
-          {
-            listen: "127.0.0.1", port: 10808, protocol: "socks",
-            settings: { auth: "noauth", udp: true },
-            sniffing: { destOverride: ["http", "tls"], enabled: true, routeOnly: true },
-            tag: "mixed-in"
-          },
-          {
-            listen: "127.0.0.1", port: 10853, protocol: "dokodemo-door",
-            settings: { address: "1.1.1.1", network: "tcp,udp", port: 53 },
-            tag: "dns-in"
+          outbounds: [
+            {
+              protocol: "vle" + "ss",
+              settings: {
+                ["vne" + "xt"]: [{
+                  address: ip,
+                  port: parseInt(portStr),
+                  users: [{ id: user.uuid, encryption: "none" }]
+                }]
+              },
+              ["stream" + "Settings"]: {
+                network: "ws",
+                ["ws" + "Settings"]: { host: host, path: "/" },
+                security: tlsVal,
+                sockopt: { ["dialer" + "Proxy"]: "fragment" }
+              },
+              tag: "proxy"
+            },
+            {
+              protocol: "freedom",
+              settings: {
+                fragment: { packets: "tlshello", length: fragLen, interval: fragInt }
+              },
+              ["stream" + "Settings"]: {
+                sockopt: {
+                  domainStrategy: "UseIP",
+                  happyEyeballs: { tryDelayMs: 250, prioritizeIPv6: false, interleave: 2, maxConcurrentTry: 4 }
+                }
+              },
+              tag: "fragment"
+            },
+            { protocol: "dns", settings: { nonIPQuery: "reject" }, tag: "dns-out" },
+            { protocol: "freedom", settings: { domainStrategy: "UseIP" }, tag: "direct" },
+            { protocol: "blackhole", settings: { response: { type: "http" } }, tag: "block" }
+          ],
+          routing: {
+            domainStrategy: "IPIfNonMatch",
+            rules: [
+              { inboundTag: ["mixed-in"], port: 53, outboundTag: "dns-out", type: "field" },
+              { inboundTag: ["dns-in"], outboundTag: "dns-out", type: "field" },
+              { inboundTag: ["remote-dns"], outboundTag: "proxy", type: "field" },
+              { inboundTag: ["dns"], outboundTag: "direct", type: "field" },
+              { domain: ["geosite:private"], outboundTag: "direct", type: "field" },
+              { ip: ["geoip:private"], outboundTag: "direct", type: "field" },
+              { network: "udp", outboundTag: "block", type: "field" },
+              { network: "tcp", outboundTag: "proxy", type: "field" }
+            ]
           }
-        ],
-        outbounds: [
-          {
-            protocol: "vle" + "ss",
-            settings: {
-              ["vne" + "xt"]: [{
-                address: ip,
-                port: parseInt(user.port),
-                users: [{ id: user.uuid, encryption: "none" }]
-              }]
-            },
-            ["stream" + "Settings"]: {
-              network: "ws",
-              ["ws" + "Settings"]: { host: host, path: "/" },
-              security: tlsVal,
-              sockopt: { ["dialer" + "Proxy"]: "fragment" }
-            },
-            tag: "proxy"
-          },
-          {
-            protocol: "freedom",
-            settings: {
-              fragment: { packets: "tlshello", length: fragLen, interval: fragInt }
-            },
-            ["stream" + "Settings"]: {
-              sockopt: {
-                domainStrategy: "UseIP",
-                happyEyeballs: { tryDelayMs: 250, prioritizeIPv6: false, interleave: 2, maxConcurrentTry: 4 }
-              }
-            },
-            tag: "fragment"
-          },
-          { protocol: "dns", settings: { nonIPQuery: "reject" }, tag: "dns-out" },
-          { protocol: "freedom", settings: { domainStrategy: "UseIP" }, tag: "direct" },
-          { protocol: "blackhole", settings: { response: { type: "http" } }, tag: "block" }
-        ],
-        routing: {
-          domainStrategy: "IPIfNonMatch",
-          rules: [
-            { inboundTag: ["mixed-in"], port: 53, outboundTag: "dns-out", type: "field" },
-            { inboundTag: ["dns-in"], outboundTag: "dns-out", type: "field" },
-            { inboundTag: ["remote-dns"], outboundTag: "proxy", type: "field" },
-            { inboundTag: ["dns"], outboundTag: "direct", type: "field" },
-            { domain: ["geosite:private"], outboundTag: "direct", type: "field" },
-            { ip: ["geoip:private"], outboundTag: "direct", type: "field" },
-            { network: "udp", outboundTag: "block", type: "field" },
-            { network: "tcp", outboundTag: "proxy", type: "field" }
-          ]
-        }
-      };
-
-      if (tlsVal === 'tls') {
-        configObj.outbounds[0]["stream" + "Settings"]["tls" + "Settings"] = {
-          serverName: host,
-          fingerprint: "chrome",
-          alpn: ["http/1.1"],
-          allowInsecure: false
         };
-      }
-      return configObj;
+
+        if (tlsVal === 'tls') {
+          configObj.outbounds[0]["stream" + "Settings"]["tls" + "Settings"] = {
+            serverName: host,
+            fingerprint: fp,
+            alpn: ["http/1.1"],
+            allowInsecure: false
+          };
+        }
+        configArray.push(configObj);
+      });
     });
 
     return new Response(JSON.stringify(configArray, null, 2), {
@@ -586,10 +598,20 @@ const SubscriptionService = {
       const parsedIps = user.ips.split('\n').map(ip => ip.trim()).filter(ip => ip.length > 0);
       if (parsedIps.length > 0) ips = parsedIps;
     }
-    const tlsVal = user.tls === 'on' ? 'tls' : 'none';
-    const links = ips.map((ip, index) => {
-      const remark = ips.length > 1 ? user.username + '-' + (index + 1) : user.username;
-      return atob('dmxlc3M6Ly8=') + user.uuid + '@' + ip + ':' + user.port + '?path=%2F&security=' + tlsVal + '&encryption=none&insecure=0&host=' + host + '&fp=chrome&type=ws&allowInsecure=0&sni=' + host + '#' + encodeURIComponent(remark);
+    const ports = String(user.port || '443').split(',').map(p => p.trim()).filter(p => p.length > 0);
+    const fp = user.fingerprint || 'chrome';
+    const links = [];
+
+    ips.forEach((ip, ipIndex) => {
+      ports.forEach((portStr) => {
+        const isTlsPort = ['443', '2053', '2083', '2087', '2096', '8443'].includes(portStr);
+        const tlsVal = isTlsPort ? 'tls' : 'none';
+        const remark = ips.length > 1 
+          ? `${user.username}-${ipIndex + 1}-${portStr}` 
+          : `${user.username}-${portStr}`;
+        
+        links.push(atob('dmxlc3M6Ly8=') + user.uuid + '@' + ip + ':' + portStr + '?path=%2F&security=' + tlsVal + '&encryption=none&insecure=0&host=' + host + '&fp=' + fp + '&type=ws&allowInsecure=0&sni=' + host + '#' + encodeURIComponent(remark));
+      });
     });
 
     const noise = [
@@ -1806,7 +1828,7 @@ body { width: 35em; margin: 0 auto; font-family: Tahoma, Verdana, Arial, sans-se
             <div class="flex flex-col sm:flex-row sm:items-center gap-3">
                 <h1 class="text-lg font-bold flex items-center gap-2" dir="ltr">
                     Zeus Panel 
-                    <span class="text-xs px-2 py-0.5 font-semibold bg-blue-100 text-blue-800 dark:bg-blue-900/30 dark:text-blue-400 rounded-full">v1.0</span>
+                    <span class="text-xs px-2 py-0.5 font-semibold bg-blue-100 text-blue-800 dark:bg-blue-900/30 dark:text-blue-400 rounded-full">v1.1</span>
                 </h1>
                 <div class="flex items-center gap-3 bg-gray-100 dark:bg-zinc-800/60 px-3 py-1.5 rounded-full border border-gray-200 dark:border-zinc-800/80 shadow-sm flex-shrink-0 w-fit">
                     <a href="https://github.com/AG-Morgan/Zeus-Panel" target="_blank" rel="noopener noreferrer" class="text-gray-700 dark:text-zinc-300 hover:text-black dark:hover:text-white transition-all transform hover:scale-125 duration-200 flex-shrink-0" title="گیت‌هاب">
@@ -1958,50 +1980,108 @@ body { width: 35em; margin: 0 auto; font-family: Tahoma, Verdana, Arial, sans-se
         </div>
     </main>
 
-    <div id="user-modal" class="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm opacity-0 pointer-events-none transition-all duration-300 ease-out">
-        <div class="w-full max-w-lg bg-white dark:bg-amoled-card border border-gray-200 dark:border-amoled-border rounded-2xl shadow-xl overflow-hidden transition-all transform duration-300 opacity-0 scale-95 ease-out">
-            <div class="px-6 py-4 border-b border-gray-150 dark:border-amoled-border flex justify-between items-center">
-                <h3 id="modal-title" class="font-bold text-gray-900 dark:text-zinc-100">ایجاد کاربر جدید</h3>
-                <button onclick="toggleModal(false)" class="text-gray-400 hover:text-gray-600 dark:hover:text-zinc-200">
-                    <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"></path></svg>
+    <div id="user-modal" class="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/70 opacity-0 pointer-events-none transition-opacity duration-200 ease-out">
+        <div id="user-modal-card" class="w-full max-w-xl bg-white dark:bg-zinc-950 border border-gray-200 dark:border-zinc-850 rounded-2xl shadow-xl overflow-hidden transition-[opacity,transform] duration-200 opacity-0 scale-95 ease-out flex flex-col max-h-[90vh] transform-gpu" style="will-change: transform, opacity;">
+            <div class="px-6 py-4 border-b border-gray-150 dark:border-zinc-800/80 flex justify-between items-center bg-gray-50/50 dark:bg-zinc-900/30">
+                <div class="flex items-center gap-2">
+                    <div class="w-2.5 h-2.5 rounded-full bg-blue-500"></div>
+                    <h3 id="modal-title" class="font-bold text-gray-900 dark:text-zinc-100 text-base">ایجاد کاربر جدید</h3>
+                </div>
+                <button onclick="toggleModal(false)" class="p-1 rounded-lg hover:bg-gray-150 dark:hover:bg-zinc-800/60 text-gray-400 hover:text-gray-650 dark:hover:text-zinc-200 transition">
+                    <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"></path></svg>
                 </button>
             </div>
 
-            <form id="create-user-form" class="p-6 space-y-4" onsubmit="handleFormSubmit(event)">
-                <div>
-                    <label class="block text-sm font-medium mb-1.5">نام کاربر</label>
-                    <input type="text" id="input-name" placeholder="مثلا: reza_vpn" class="w-full px-3 py-2 bg-gray-50 dark:bg-amoled-input border border-gray-300 dark:border-amoled-border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 text-sm" required>
-                </div>
-                <div class="grid grid-cols-2 gap-4">
+            <form id="create-user-form" class="p-6 space-y-5 overflow-y-auto flex-1 overscroll-contain" style="-webkit-overflow-scrolling: touch; transform: translate3d(0,0,0); will-change: scroll-position, transform;" onsubmit="handleFormSubmit(event)">
+                <div class="space-y-4">
                     <div>
-                        <label class="block text-sm font-medium mb-1.5">حجم مجاز (GB)</label>
-                        <input type="number" id="input-limit" min="0" step="any" placeholder="خالی = نامحدود" class="w-full px-3 py-2 bg-gray-50 dark:bg-amoled-input border border-gray-300 dark:border-amoled-border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 text-sm">
+                        <label class="block text-xs font-bold text-gray-500 dark:text-zinc-400 mb-2 uppercase tracking-wider">نام کاربری</label>
+                        <div class="relative">
+                            <span class="absolute inset-y-0 right-0 flex items-center pr-3.5 pointer-events-none text-gray-400">
+                                <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z"></path></svg>
+                            </span>
+                            <input type="text" id="input-name" placeholder="مثلا: reza_vpn" class="w-full pl-3 pr-10 py-2.5 bg-gray-50 dark:bg-zinc-900 border border-gray-200 dark:border-zinc-800 rounded-xl focus:outline-none focus:ring-2 focus:ring-blue-500/50 text-sm font-semibold text-gray-800 dark:text-zinc-100 placeholder-gray-400/80 transition" required>
+                        </div>
                     </div>
-                    <div>
-                        <label class="block text-sm font-medium mb-1.5">مدت اعتبار (روز)</label>
-                        <input type="number" id="input-expiry" min="0" placeholder="خالی = نامحدود" class="w-full px-3 py-2 bg-gray-50 dark:bg-amoled-input border border-gray-300 dark:border-amoled-border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 text-sm">
+
+                    <div class="grid grid-cols-2 gap-4">
+                        <div>
+                            <label class="block text-xs font-bold text-gray-500 dark:text-zinc-400 mb-2 uppercase tracking-wider">حجم مجاز (GB)</label>
+                            <div class="relative">
+                                <span class="absolute inset-y-0 right-0 flex items-center pr-3.5 pointer-events-none text-gray-400">
+                                    <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 11H5m14 0a2 2 0 012 2v6a2 2 0 01-2 2H5a2 2 0 01-2-2v-6a2 2 0 012-2m14 0V9a2 2 0 00-2-2M5 11V9a2 2 0 012-2m0 0V5a2 2 0 012-2h6a2 2 0 012 2v2M7 7h10"></path></svg>
+                                </span>
+                                <input type="number" id="input-limit" min="0" step="any" placeholder="نامحدود" class="w-full pl-3 pr-10 py-2.5 bg-gray-50 dark:bg-zinc-900 border border-gray-200 dark:border-zinc-800 rounded-xl focus:outline-none focus:ring-2 focus:ring-blue-500/50 text-sm font-semibold text-gray-800 dark:text-zinc-100 placeholder-gray-400/80 transition">
+                            </div>
+                        </div>
+                        <div>
+                            <label class="block text-xs font-bold text-gray-500 dark:text-zinc-400 mb-2 uppercase tracking-wider">مدت اعتبار (روز)</label>
+                            <div class="relative">
+                                <span class="absolute inset-y-0 right-0 flex items-center pr-3.5 pointer-events-none text-gray-400">
+                                    <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z"></path></svg>
+                                </span>
+                                <input type="number" id="input-expiry" min="0" placeholder="نامحدود" class="w-full pl-3 pr-10 py-2.5 bg-gray-50 dark:bg-zinc-900 border border-gray-200 dark:border-zinc-800 rounded-xl focus:outline-none focus:ring-2 focus:ring-blue-500/50 text-sm font-semibold text-gray-800 dark:text-zinc-100 placeholder-gray-400/80 transition">
+                            </div>
+                        </div>
                     </div>
                 </div>
-                <div>
-                    <label class="block text-sm font-medium mb-1.5">آی‌پی تمیز (هر خط یک آی‌پی)</label>
-                    <textarea id="input-ips" rows="3" placeholder="104.16.0.1" class="w-full px-3 py-2 bg-gray-50 dark:bg-amoled-input border border-gray-300 dark:border-amoled-border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 text-xs font-mono"></textarea>
-                </div>
-                <div class="grid grid-cols-2 gap-4">
-                    <div>
-                        <label class="block text-sm font-medium mb-1.5">وضعیت TLS</label>
-                        <select id="tls-toggle" class="w-full px-3 py-2 bg-gray-50 dark:bg-amoled-input border border-gray-300 dark:border-amoled-border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 text-sm">
-                            <option value="on" selected>روشن (TLS)</option>
-                            <option value="off">خاموش (بدون TLS)</option>
-                        </select>
+
+                <div class="pt-2 border-t border-gray-100 dark:border-zinc-900">
+                    <label class="block text-xs font-bold text-gray-500 dark:text-zinc-400 mb-3 uppercase tracking-wider">پورت‌های اتصال (انتخاب چندگانه)</label>
+                    <div class="space-y-4">
+                        <div class="p-4 bg-gray-50/50 dark:bg-zinc-900/20 border border-gray-200/60 dark:border-zinc-850 rounded-2xl shadow-sm">
+                            <div class="flex items-center gap-1.5 mb-3">
+                                <span class="flex h-2 w-2 rounded-full bg-blue-500 shadow-sm"></span>
+                                <span class="text-xs font-bold text-blue-600 dark:text-blue-400">🔒 پورت‌های امن (TLS)</span>
+                            </div>
+                            <div class="grid grid-cols-3 sm:grid-cols-4 gap-2" id="tls-ports-list">
+                                <!-- Filled dynamically -->
+                            </div>
+                        </div>
+
+                        <div class="p-4 bg-gray-50/50 dark:bg-zinc-900/20 border border-gray-200/60 dark:border-zinc-850 rounded-2xl shadow-sm">
+                            <div class="flex items-center gap-1.5 mb-3">
+                                <span class="flex h-2 w-2 rounded-full bg-amber-500 shadow-sm"></span>
+                                <span class="text-xs font-bold text-amber-600 dark:text-amber-400">🔓 پورت‌های معمولی (Non-TLS)</span>
+                            </div>
+                            <div class="grid grid-cols-3 sm:grid-cols-4 gap-2" id="nontls-ports-list">
+                                <!-- Filled dynamically -->
+                            </div>
+                        </div>
                     </div>
+                </div>
+
+                <div class="pt-4 border-t border-gray-100 dark:border-zinc-900 space-y-4">
                     <div>
-                        <label class="block text-sm font-medium mb-1.5">پورت اتصال</label>
-                        <select id="port-select" class="w-full px-3 py-2 bg-gray-50 dark:bg-amoled-input border border-gray-300 dark:border-amoled-border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 text-sm"></select>
+                        <label class="block text-xs font-bold text-gray-500 dark:text-zinc-400 mb-2 uppercase tracking-wider">آی‌پی تمیز کلودفلر (اختیاری - هر خط یک آی‌پی)</label>
+                        <textarea id="input-ips" rows="2" placeholder="104.16.0.1" class="w-full px-3 py-2.5 bg-gray-50 dark:bg-zinc-900 border border-gray-200 dark:border-zinc-800 rounded-xl focus:outline-none focus:ring-2 focus:ring-blue-500/50 text-xs font-mono text-gray-800 dark:text-zinc-100 placeholder-gray-400/80 transition resize-none"></textarea>
+                    </div>
+
+                    <div>
+                        <label class="block text-xs font-bold text-gray-500 dark:text-zinc-400 mb-2 uppercase tracking-wider">شبیه‌ساز اثر انگشت مرورگر (Fingerprint)</label>
+                        <div class="relative">
+                            <select id="fingerprint-select" class="w-full px-3 py-2.5 bg-gray-50 dark:bg-zinc-900 border border-gray-200 dark:border-zinc-800 rounded-xl focus:outline-none focus:ring-2 focus:ring-blue-500/50 text-xs font-semibold text-gray-700 dark:text-zinc-300 cursor-pointer appearance-none">
+                                <option value="chrome" selected>🌐 Chrome (پیش‌فرض)</option>
+                                <option value="firefox">🦊 Firefox</option>
+                                <option value="safari">🧭 Safari</option>
+                                <option value="ios">📱 iOS Device</option>
+                                <option value="android">🤖 Android Device</option>
+                                <option value="edge">🌀 Microsoft Edge</option>
+                                <option value="360">🔒 360 Browser</option>
+                                <option value="qq">💬 QQ Browser</option>
+                                <option value="random">🎲 Random (اتفاقی)</option>
+                                <option value="randomized">🎭 Randomized (پویا)</option>
+                            </select>
+                            <div class="pointer-events-none absolute inset-y-0 left-0 flex items-center pl-3 text-gray-500 dark:text-zinc-400">
+                                <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"></path></svg>
+                            </div>
+                        </div>
                     </div>
                 </div>
+
                 <div class="pt-4 flex gap-3">
-                    <button type="button" onclick="toggleModal(false)" class="flex-1 py-2 bg-gray-100 hover:bg-gray-200 dark:bg-zinc-800 dark:hover:bg-zinc-700 font-medium rounded-lg text-sm transition">انصراف</button>
-                    <button type="submit" id="submit-btn" class="flex-1 py-2 bg-blue-600 hover:bg-blue-700 text-white font-medium rounded-lg text-sm transition">ایجاد کاربر</button>
+                    <button type="button" onclick="toggleModal(false)" class="flex-1 py-3 bg-gray-100 hover:bg-gray-200 dark:bg-zinc-800 dark:hover:bg-zinc-700/80 text-gray-700 dark:text-zinc-300 font-bold rounded-xl text-sm transition duration-200">انصراف</button>
+                    <button type="submit" id="submit-btn" class="flex-1 py-3 bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-700 hover:to-indigo-700 text-white font-bold rounded-xl text-sm transition duration-200 shadow-md shadow-blue-500/10 hover:shadow-lg">ایجاد کاربر</button>
                 </div>
             </form>
         </div>
@@ -2077,10 +2157,40 @@ body { width: 35em; margin: 0 auto; font-family: Tahoma, Verdana, Arial, sans-se
         const tlsPorts = ['443', '2053', '2083', '2087', '2096', '8443'];
         const nonTlsPorts = ['80', '8080', '8880', '2052', '2082', '2086', '2095'];
 
-        const tlsToggle = document.getElementById('tls-toggle');
-        const portSelect = document.getElementById('port-select');
         let isEditMode = false;
         let editingUsername = '';
+
+        function renderPortCheckboxes() {
+            const tlsContainer = document.getElementById('tls-ports-list');
+            const nonTlsContainer = document.getElementById('nontls-ports-list');
+
+            tlsContainer.innerHTML = tlsPorts.map(function(port) {
+                const isCheckedDefault = port === '443' ? 'checked' : '';
+                return '<label class="relative cursor-pointer">' +
+                    '<input type="checkbox" name="ports" value="' + port + '" ' + isCheckedDefault + ' class="peer sr-only">' +
+                    '<div class="flex items-center justify-center gap-2 px-3 py-2 border border-gray-200 dark:border-zinc-800/80 rounded-xl text-xs font-semibold select-none transition-all duration-200 hover:bg-gray-50 dark:hover:bg-zinc-800/40 text-gray-700 dark:text-zinc-300 peer-checked:bg-blue-50 dark:peer-checked:bg-blue-950/25 peer-checked:border-blue-500 dark:peer-checked:border-blue-500/70 peer-checked:text-blue-600 dark:peer-checked:text-blue-400 shadow-sm">' +
+                        '<span>' + port + '</span>' +
+                        '<svg class="w-4 h-4 hidden peer-checked:block text-blue-500" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M5 13l4 4L19 7"></path></svg>' +
+                    '</div>' +
+                '</label>';
+            }).join('');
+
+            nonTlsContainer.innerHTML = nonTlsPorts.map(function(port) {
+                return '<label class="relative cursor-pointer">' +
+                    '<input type="checkbox" name="ports" value="' + port + '" class="peer sr-only">' +
+                    '<div class="flex items-center justify-center gap-2 px-3 py-2 border border-gray-200 dark:border-zinc-800/80 rounded-xl text-xs font-semibold select-none transition-all duration-200 hover:bg-gray-50 dark:hover:bg-zinc-800/40 text-gray-700 dark:text-zinc-300 peer-checked:bg-amber-50 dark:peer-checked:bg-amber-950/25 peer-checked:border-amber-500 dark:peer-checked:border-amber-500/70 peer-checked:text-amber-600 dark:peer-checked:text-amber-400 shadow-sm">' +
+                        '<span>' + port + '</span>' +
+                        '<svg class="w-4 h-4 hidden peer-checked:block text-amber-500" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M5 13l4 4L19 7"></path></svg>' +
+                    '</div>' +
+                '</label>';
+            }).join('');
+        }
+
+        // Initialize 443 active state immediately
+        setTimeout(function() {
+            const cb443 = document.querySelector('input[name="ports"][value="443"]');
+            if (cb443) cb443.checked = true;
+        }, 100);
 
         function toggleSettingsModal(show) {
             const modal = document.getElementById('settings-modal');
@@ -2098,18 +2208,9 @@ body { width: 35em; margin: 0 auto; font-family: Tahoma, Verdana, Arial, sans-se
             }
         }
 
-        function updatePorts() {
-            const isTls = tlsToggle.value === 'on';
-            const ports = isTls ? tlsPorts : nonTlsPorts;
-            portSelect.innerHTML = ports.map(port => '<option value="' + port + '">' + port + '</option>').join('');
-        }
-
-        tlsToggle.addEventListener('change', updatePorts);
-        updatePorts();
-
         function toggleModal(show) {
             const modal = document.getElementById('user-modal');
-            const card = modal.querySelector('div');
+            const card = document.getElementById('user-modal-card');
             if (show) {
                 modal.classList.remove('opacity-0', 'pointer-events-none');
                 modal.classList.add('opacity-100', 'pointer-events-auto');
@@ -2126,7 +2227,9 @@ body { width: 35em; margin: 0 auto; font-family: Tahoma, Verdana, Arial, sans-se
                 document.getElementById('submit-btn').innerText = 'ایجاد کاربر';
                 document.getElementById('input-name').disabled = false;
                 document.getElementById('create-user-form').reset();
-                updatePorts();
+                // Ensure port 443 remains checked as default when form is reset
+                const cb443 = document.querySelector('input[name="ports"][value="443"]');
+                if (cb443) cb443.checked = true;
             }
         }
 
@@ -2137,7 +2240,6 @@ body { width: 35em; margin: 0 auto; font-family: Tahoma, Verdana, Arial, sans-se
             document.getElementById('submit-btn').innerText = 'ایجاد کاربر';
             document.getElementById('input-name').disabled = false;
             document.getElementById('create-user-form').reset();
-            updatePorts();
             toggleModal(true);
         }
 
@@ -2419,7 +2521,16 @@ body { width: 35em; margin: 0 auto; font-family: Tahoma, Verdana, Arial, sans-se
                                 '</div>' +
                             '</td>' +
                             '<td class="p-4 text-xs font-mono uppercase text-blue-500 font-semibold">VLESS</td>' +
-                            '<td class="p-4 text-xs">' + user.port + ' (' + (user.tls === 'on' ? 'TLS' : 'بدون TLS') + ')</td>' +
+                            '<td class="p-4 text-xs">' + 
+                                '<div class="flex flex-wrap gap-1 max-w-[160px]">' +
+                                    String(user.port || "").split(",").map(function(p) {
+                                        p = p.trim();
+                                        if (!p) return "";
+                                        var isTls = tlsPorts.includes(p);
+                                        return '<span class="inline-block px-1.5 py-0.5 text-[10px] font-semibold rounded ' + (isTls ? 'bg-blue-100 text-blue-800 dark:bg-blue-900/30 dark:text-blue-400' : 'bg-amber-100 text-amber-800 dark:bg-amber-900/30 dark:text-amber-400') + '">' + p + '</span>';
+                                    }).join("") +
+                                '</div>' +
+                            '</td>' +
                             '<td class="p-4">' + volumeHtml + '</td>' +
                             '<td class="p-4">' + expiryHtml + '</td>' +
                             '<td class="p-4 text-xs text-gray-500">' + createdDate + '</td>' +
@@ -2455,9 +2566,23 @@ body { width: 35em; margin: 0 auto; font-family: Tahoma, Verdana, Arial, sans-se
             const username = document.getElementById('input-name').value;
             const limit = document.getElementById('input-limit').value || null;
             const expiry = document.getElementById('input-expiry').value || null;
-            const tls = document.getElementById('tls-toggle').value;
-            const port = portSelect.value;
+            
+            // Gather multiple selected ports
+            const checkedPorts = Array.from(document.querySelectorAll('input[name="ports"]:checked')).map(cb => cb.value);
+            
+            // Validation: Ensure at least one port is selected
+            if (checkedPorts.length === 0) {
+                alert('⚠️ لطفا حداقل یک پورت را برای اتصال انتخاب کنید!');
+                submitButton.disabled = false;
+                submitButton.innerText = isEditMode ? 'ذخیره تغییرات' : 'ایجاد کاربر';
+                return;
+            }
+
+            const port = checkedPorts.join(',');
+            const tls = checkedPorts.some(p => tlsPorts.includes(p)) ? 'on' : 'off';
+            
             const ips = document.getElementById('input-ips').value;
+            const fingerprint = document.getElementById('fingerprint-select').value;
 
             const url = isEditMode ? '/api/users/' + encodeURIComponent(editingUsername) : '/api/users';
             const method = isEditMode ? 'PUT' : 'POST';
@@ -2466,7 +2591,7 @@ body { width: 35em; margin: 0 auto; font-family: Tahoma, Verdana, Arial, sans-se
                 const response = await fetch(url, {
                     method: method,
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ username, limit_gb: limit, expiry_days: expiry, tls, port, ips })
+                    body: JSON.stringify({ username, limit_gb: limit, expiry_days: expiry, tls, port, ips, fingerprint })
                 });
                 
                 if (response.ok) {
@@ -2516,13 +2641,30 @@ body { width: 35em; margin: 0 auto; font-family: Tahoma, Verdana, Arial, sans-se
             const user = window.allUsers.find(u => u.username === username);
             if (!user) return '';
             const host = window.location.hostname;
-            let cleanIp = host;
+            
+            let ips = [host];
             if (user.ips) {
-                const ips = user.ips.split('\\n').map(ip => ip.trim()).filter(ip => ip.length > 0);
-                if (ips.length > 0) cleanIp = ips[0];
+                const parsedIps = user.ips.split('\\n').map(ip => ip.trim()).filter(ip => ip.length > 0);
+                if (parsedIps.length > 0) ips = parsedIps;
             }
-            const tlsVal = user.tls === 'on' ? 'tls' : 'none';
-            return 'vle' + 'ss://' + (user.uuid || '') + '@' + cleanIp + ':' + user.port + '?path=%2F&security=' + tlsVal + '&encryption=none&insecure=0&host=' + host + '&fp=chrome&type=ws&allowInsecure=0&sni=' + host + '#' + encodeURIComponent(username);
+            
+            const ports = String(user.port || '443').split(',').map(p => p.trim()).filter(p => p.length > 0);
+            const fp = user.fingerprint || 'chrome';
+            const links = [];
+
+            ips.forEach((ip, ipIndex) => {
+                ports.forEach((portStr) => {
+                    const isTlsPort = tlsPorts.includes(portStr);
+                    const tlsVal = isTlsPort ? 'tls' : 'none';
+                    const remark = ips.length > 1 
+                        ? (user.username + '-' + (ipIndex + 1) + '-' + portStr) 
+                        : (user.username + '-' + portStr);
+                    
+                    links.push('vle' + 'ss://' + (user.uuid || '') + '@' + ip + ':' + portStr + '?path=%2F&security=' + tlsVal + '&encryption=none&insecure=0&host=' + host + '&fp=' + fp + '&type=ws&allowInsecure=0&sni=' + host + '#' + encodeURIComponent(remark));
+                });
+            });
+
+            return links.join('\\n');
         }
 
         function getSubLink(username) {
@@ -2589,98 +2731,109 @@ body { width: 35em; margin: 0 auto; font-family: Tahoma, Verdana, Arial, sans-se
             const user = window.allUsers.find(u => u.username === username);
             if (!user) return;
             const host = window.location.hostname;
-            let cleanIp = host;
+            let ips = [host];
             if (user.ips) {
-                const ips = user.ips.split('\\n').map(ip => ip.trim()).filter(ip => ip.length > 0);
-                if (ips.length > 0) cleanIp = ips[0];
+                ips = user.ips.split('\\n').map(ip => ip.trim()).filter(ip => ip.length > 0);
+                if (ips.length === 0) ips = [host];
             }
             
-            const tlsVal = user.tls === 'on' ? 'tls' : 'none';
+            const ports = String(user.port || '443').split(',').map(p => p.trim()).filter(p => p.length > 0);
+            const fp = user.fingerprint || 'chrome';
 
-            const jsonConfig = {
-              "remarks": username + " - Fragment",
-              "version": { "min": "25.10.15" },
-              "log": { "loglevel": "none" },
-              "dns": {
-                "servers": [
-                  { "address": "https://8.8.8.8/dns-query", "tag": "remote-dns" },
-                  { "address": "8.8.8.8", "domains": ["full:" + host], "skipFallback": true }
-                ],
-                "queryStrategy": "UseIP",
-                "tag": "dns"
-              },
-              "inbounds": [
-                {
-                  "listen": "127.0.0.1", "port": 10808, "protocol": "socks",
-                  "settings": { "auth": "noauth", "udp": true },
-                  "sniffing": { "destOverride": ["http", "tls"], "enabled": true, "routeOnly": true },
-                  "tag": "mixed-in"
-                },
-                {
-                  "listen": "127.0.0.1", "port": 10853, "protocol": "dokodemo-door",
-                  "settings": { "address": "1.1.1.1", "network": "tcp,udp", "port": 53 },
-                  "tag": "dns-in"
-                }
-              ],
-              "outbounds": [
-                {
-                  "protocol": "vle" + "ss",
-                  "settings": {
-                    ["vne" + "xt"]: [
-                      { "address": cleanIp, "port": parseInt(user.port), "users": [{ "id": user.uuid, "encryption": "none" }] }
+            const configArray = [];
+            ips.forEach((ip, ipIndex) => {
+              ports.forEach((portStr) => {
+                const isTlsPort = tlsPorts.includes(portStr);
+                const tlsVal = isTlsPort ? 'tls' : 'none';
+                const remark = ips.length > 1 ? (user.username + ' - IP ' + (ipIndex + 1) + ' - Port ' + portStr) : (user.username + ' - Port ' + portStr);
+                
+                const jsonConfig = {
+                  "remarks": remark,
+                  "version": { "min": "25.10.15" },
+                  "log": { "loglevel": "none" },
+                  "dns": {
+                    "servers": [
+                      { "address": "https://8.8.8.8/dns-query", "tag": "remote-dns" },
+                      { "address": "8.8.8.8", "domains": ["full:" + host], "skipFallback": true }
+                    ],
+                    "queryStrategy": "UseIP",
+                    "tag": "dns"
+                  },
+                  "inbounds": [
+                    {
+                      "listen": "127.0.0.1", "port": 10808, "protocol": "socks",
+                      "settings": { "auth": "noauth", "udp": true },
+                      "sniffing": { "destOverride": ["http", "tls"], "enabled": true, "routeOnly": true },
+                      "tag": "mixed-in"
+                    },
+                    {
+                      "listen": "127.0.0.1", "port": 10853, "protocol": "dokodemo-door",
+                      "settings": { "address": "1.1.1.1", "network": "tcp,udp", "port": 53 },
+                      "tag": "dns-in"
+                    }
+                  ],
+                  "outbounds": [
+                    {
+                      "protocol": "vle" + "ss",
+                      "settings": {
+                        ["vne" + "xt"]: [
+                          { "address": ip, "port": parseInt(portStr), "users": [{ "id": user.uuid, "encryption": "none" }] }
+                        ]
+                      },
+                      ["stream" + "Settings"]: {
+                        "network": "ws",
+                        ["ws" + "Settings"]: { "host": host, "path": "/" },
+                        "security": tlsVal,
+                        "sockopt": { ["dialer" + "Proxy"]: "fragment" }
+                      },
+                      "tag": "proxy"
+                    },
+                    {
+                      "protocol": "freedom",
+                      "settings": {
+                        "fragment": {
+                          "packets": "tlshello",
+                          "length": window.globalFragLen || "20-30",
+                          "interval": window.globalFragInt || "1-2"
+                        }
+                      },
+                      "streamSettings": {
+                        "sockopt": {
+                          "domainStrategy": "UseIP",
+                          "happyEyeballs": { "tryDelayMs": 250, "prioritizeIPv6": false, "interleave": 2, "maxConcurrentTry": 4 }
+                        }
+                      },
+                      "tag": "fragment"
+                    },
+                    { "protocol": "dns", "settings": { "nonIPQuery": "reject" }, "tag": "dns-out" },
+                    { "protocol": "freedom", "settings": { "domainStrategy": "UseIP" }, "tag": "direct" },
+                    { "protocol": "blackhole", "settings": { "response": { "type": "http" } }, "tag": "block" }
+                  ],
+                  "routing": {
+                    "domainStrategy": "IPIfNonMatch",
+                    "rules": [
+                      { "inboundTag": ["mixed-in"], "port": 53, "outboundTag": "dns-out", "type": "field" },
+                      { "inboundTag": ["dns-in"], "outboundTag": "dns-out", "type": "field" },
+                      { "inboundTag": ["remote-dns"], "outboundTag": "proxy", "type": "field" },
+                      { "inboundTag": ["dns"], "outboundTag": "direct", "type": "field" },
+                      { "domain": ["geosite:private"], "outboundTag": "direct", "type": "field" },
+                      { "ip": ["geoip:private"], "outboundTag": "direct", "type": "field" },
+                      { "network": "udp", "outboundTag": "block", "type": "field" },
+                      { "network": "tcp", "outboundTag": "proxy", "type": "field" }
                     ]
-                  },
-                  ["stream" + "Settings"]: {
-                    "network": "ws",
-                    ["ws" + "Settings"]: { "host": host, "path": "/" },
-                    "security": tlsVal,
-                    "sockopt": { ["dialer" + "Proxy"]: "fragment" }
-                  },
-                  "tag": "proxy"
-                },
-                {
-                  "protocol": "freedom",
-                  "settings": {
-                    "fragment": {
-                      "packets": "tlshello",
-                      "length": window.globalFragLen || "20-30",
-                      "interval": window.globalFragInt || "1-2"
-                    }
-                  },
-                  "streamSettings": {
-                    "sockopt": {
-                      "domainStrategy": "UseIP",
-                      "happyEyeballs": { "tryDelayMs": 250, "prioritizeIPv6": false, "interleave": 2, "maxConcurrentTry": 4 }
-                    }
-                  },
-                  "tag": "fragment"
-                },
-                { "protocol": "dns", "settings": { "nonIPQuery": "reject" }, "tag": "dns-out" },
-                { "protocol": "freedom", "settings": { "domainStrategy": "UseIP" }, "tag": "direct" },
-                { "protocol": "blackhole", "settings": { "response": { "type": "http" } }, "tag": "block" }
-              ],
-              "routing": {
-                "domainStrategy": "IPIfNonMatch",
-                "rules": [
-                  { "inboundTag": ["mixed-in"], "port": 53, "outboundTag": "dns-out", "type": "field" },
-                  { "inboundTag": ["dns-in"], "outboundTag": "dns-out", "type": "field" },
-                  { "inboundTag": ["remote-dns"], "outboundTag": "proxy", "type": "field" },
-                  { "inboundTag": ["dns"], "outboundTag": "direct", "type": "field" },
-                  { "domain": ["geosite:private"], "outboundTag": "direct", "type": "field" },
-                  { "ip": ["geoip:private"], "outboundTag": "direct", "type": "field" },
-                  { "network": "udp", "outboundTag": "block", "type": "field" },
-                  { "network": "tcp", "outboundTag": "proxy", "type": "field" }
-                ]
-              }
-            };
-            
-            if (tlsVal === 'tls') {
-              jsonConfig.outbounds[0]["stream" + "Settings"]["tls" + "Settings"] = {
-                "serverName": host, "fingerprint": "chrome", "alpn": ["http/1.1"], "allowInsecure": false
-              };
-            }
+                  }
+                };
+                
+                if (tlsVal === 'tls') {
+                  jsonConfig.outbounds[0]["stream" + "Settings"]["tls" + "Settings"] = {
+                    "serverName": host, "fingerprint": fp, "alpn": ["http/1.1"], "allowInsecure": false
+                  };
+                }
+                configArray.push(jsonConfig);
+              });
+            });
 
-            navigator.clipboard.writeText(JSON.stringify(jsonConfig, null, 2)).then(() => {
+            navigator.clipboard.writeText(JSON.stringify(configArray, null, 2)).then(() => {
                 alert('✅ کانفیگ JSON با موفقیت کپی شد!');
             }).catch(() => {
                 alert('خطا در کپی کردن کانفیگ JSON!');
@@ -2716,11 +2869,13 @@ body { width: 35em; margin: 0 auto; font-family: Tahoma, Verdana, Arial, sans-se
             document.getElementById('input-expiry').value = user.expiry_days || '';
             document.getElementById('input-ips').value = user.ips || '';
 
-            const tlsToggle = document.getElementById('tls-toggle');
-            tlsToggle.value = user.tls || 'on';
-            updatePorts();
+            document.getElementById('fingerprint-select').value = user.fingerprint || 'chrome';
 
-            document.getElementById('port-select').value = user.port || '';
+            const userPorts = String(user.port || '').split(',').map(p => p.trim());
+            document.querySelectorAll('input[name="ports"]').forEach(cb => {
+                cb.checked = userPorts.includes(cb.value);
+            });
+
             toggleModal(true);
         }
 
@@ -2916,6 +3071,7 @@ body { width: 35em; margin: 0 auto; font-family: Tahoma, Verdana, Arial, sans-se
         }
 
         document.addEventListener('DOMContentLoaded', () => {
+            renderPortCheckboxes();
             loadUsers();
             loadLocations();
             setInterval(() => loadUsers(true), 60000);
@@ -3085,9 +3241,24 @@ body { width: 35em; margin: 0 auto; font-family: Tahoma, Verdana, Arial, sans-se
 
         function getVlessLink() {
             const u = window.statusUser;
-            const tlsVal = u.tls === 'on' ? 'tls' : 'none';
-            const remark = u.username;
-            return atob('dmxlc3M6Ly8=') + u.uuid + '@' + getHost() + ':' + u.port + '?path=%2F&security=' + tlsVal + '&encryption=none&insecure=0&host=' + getHost() + '&fp=chrome&type=ws&allowInsecure=0&sni=' + getHost() + '#' + encodeURIComponent(remark);
+            const host = getHost();
+            var ips = [host];
+            if (u.ips) {
+                ips = u.ips.split('\\n').map(function(ip) { return ip.trim(); }).filter(function(ip) { return ip.length > 0; });
+                if (ips.length === 0) ips = [host];
+            }
+            var ports = String(u.port || '443').split(',').map(function(p) { return p.trim(); }).filter(function(p) { return p.length > 0; });
+            var fp = u.fingerprint || 'chrome';
+            var links = [];
+            ips.forEach(function(ip, ipIndex) {
+                ports.forEach(function(portStr) {
+                    var isTlsPort = ['443', '2053', '2083', '2087', '2096', '8443'].includes(portStr);
+                    var tlsVal = isTlsPort ? 'tls' : 'none';
+                    var remark = ips.length > 1 ? (u.username + '-' + (ipIndex + 1) + '-' + portStr) : (u.username + '-' + portStr);
+                    links.push('vle' + 'ss://' + (u.uuid || '') + '@' + ip + ':' + portStr + '?path=%2F&security=' + tlsVal + '&encryption=none&insecure=0&host=' + host + '&fp=' + fp + '&type=ws&allowInsecure=0&sni=' + host + '#' + encodeURIComponent(remark));
+                });
+            });
+            return links.join('\\n');
         }
 
         function copyVlessConfig() {
@@ -3153,7 +3324,7 @@ body { width: 35em; margin: 0 auto; font-family: Tahoma, Verdana, Arial, sans-se
                     daysRemaining = diffDays > 0 ? diffDays : 0;
                     
                     const pct = Math.max(0, Math.min(100, (daysRemaining / u.expiry_days) * 100));
-                    document.getElementById('expiry-pct').innerText = (100 - pct).toFixed(0) + '٪';
+                    document.getElementById('expiry-pct').innerText = pct.toFixed(0) + '٪';
                     document.getElementById('expiry-progress').style.width = pct + '%';
                     
                     const hue = pct * 1.2;
