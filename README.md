@@ -1,7 +1,6 @@
 <div dir="rtl" align="center">
 
-<img width="1580" height="855" alt="Screenshot 2026-06-11 215158" src="https://github.com/user-attachments/assets/6954b79a-4361-4420-8a2a-40ccc41c427b" />
-
+<img width="1895" height="862" alt="Screenshot 2026-06-11 215331" src="https://github.com/user-attachments/assets/2e0ce457-106a-426a-b98f-33f3e4d39067" />
 
 <div dir="rtl" align="right">
 
