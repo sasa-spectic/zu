@@ -50,6 +50,11 @@ export default {
       return await Router.handlePanel(request, env);
     }
 
+    // لود کردن صفحه وضعیت کاربر
+    if (url.pathname.startsWith('/status/')) {
+      return await Router.handleUserStatus(url, env);
+    }
+
     // نمایش صفحه فیک Nginx برای تمامی مسیرهای متفرقه
     return new Response(HTML_TEMPLATES.nginx, {
       headers: { "Content-Type": "text/html; charset=utf-8" }
@@ -134,6 +139,39 @@ const Router = {
     });
   },
 
+  async handleUserStatus(url, env) {
+    const username = decodeURIComponent(url.pathname.slice(8));
+    if (!username) {
+      return new Response("Username is required", { status: 400 });
+    }
+    try {
+      const user = await env.DB.prepare("SELECT * FROM users WHERE username = ? OR uuid = ?").bind(username, username).first();
+      if (!user) {
+        return new Response("User not found", { status: 404 });
+      }
+      const userJson = JSON.stringify({
+        username: user.username,
+        uuid: user.uuid,
+        limit_gb: user.limit_gb,
+        expiry_days: user.expiry_days,
+        used_gb: user.used_gb,
+        is_active: user.is_active,
+        created_at: user.created_at,
+        tls: user.tls,
+        port: user.port
+      });
+      const html = HTML_TEMPLATES.status.replace(
+        "/* {{USER_DATA_PLACEHOLDER}} */",
+        `window.statusUser = ${userJson};`
+      );
+      return new Response(html, {
+        headers: { "Content-Type": "text/html; charset=utf-8" }
+      });
+    } catch (err) {
+      return new Response("Error: " + err.message, { status: 500 });
+    }
+  },
+
   async handleApi(request, url, env, ctx) {
     const hasPassword = await DbService.getPanelPassword(env.DB);
 
@@ -178,11 +216,51 @@ const Router = {
       });
     }
 
+    // API: خروج از پنل
+    if (url.pathname === '/api/logout' && request.method === 'POST') {
+      return new Response(JSON.stringify({ success: true }), {
+        headers: {
+          "Content-Type": "application/json; charset=utf-8",
+          "Set-Cookie": "panel_session=; Path=/; Expires=Thu, 01 Jan 1970 00:00:00 GMT; HttpOnly; Secure; SameSite=Lax"
+        }
+      });
+    }
+
     // بررسی عمومی احراز هویت برای بقیه APIها
     const authorized = await DbService.verifyApiAuth(request, env);
     if (!authorized) {
       return new Response(JSON.stringify({ error: "Unauthorized" }), { 
         status: 401, headers: { "Content-Type": "application/json; charset=utf-8" } 
+      });
+    }
+
+    // API: تغییر رمز عبور مدیریت
+    if (url.pathname === '/api/change-password' && request.method === 'POST') {
+      const { current_password, new_password } = await request.json();
+      if (!current_password || !new_password) {
+        return new Response(JSON.stringify({ error: "رمز عبور فعلی و جدید الزامی هستند" }), { 
+          status: 400, headers: { "Content-Type": "application/json; charset=utf-8" } 
+        });
+      }
+      const currentHash = await DbService.sha256(current_password);
+      const storedHash = await DbService.getPanelPassword(env.DB);
+      if (storedHash && storedHash !== currentHash) {
+        return new Response(JSON.stringify({ error: "رمز عبور فعلی اشتباه است" }), { 
+          status: 401, headers: { "Content-Type": "application/json; charset=utf-8" } 
+        });
+      }
+      if (new_password.length < 4) {
+        return new Response(JSON.stringify({ error: "رمز عبور جدید باید حداقل ۴ کاراکتر باشد" }), { 
+          status: 400, headers: { "Content-Type": "application/json; charset=utf-8" } 
+        });
+      }
+      const newHash = await DbService.sha256(new_password);
+      await DbService.setPanelPassword(env.DB, newHash);
+      return new Response(JSON.stringify({ success: true }), {
+        headers: { 
+          "Content-Type": "application/json; charset=utf-8",
+          "Set-Cookie": "panel_session=" + newHash + "; Path=/; HttpOnly; Secure; SameSite=Lax"
+        }
       });
     }
 
@@ -235,18 +313,26 @@ const Router = {
         const username = decodeURIComponent(pathParts.pop());
         
         if (request.method === 'PUT') {
-          const { limit_gb, expiry_days, ips, tls, port } = await request.json();
-          await env.DB.prepare(
-            "UPDATE users SET limit_gb = ?, expiry_days = ?, ips = ?, tls = ?, port = ? WHERE username = ?"
-          ).bind(
-            limit_gb ? parseFloat(limit_gb) : null, 
-            expiry_days ? parseInt(expiry_days) : null, 
-            ips || null, 
-            tls, 
-            parseInt(port),
-            username
-          ).run();
-          return new Response(JSON.stringify({ success: true }), { headers: { "Content-Type": "application/json" } });
+          const body = await request.json();
+          if (body.toggle_only !== undefined) {
+            await env.DB.prepare(
+              "UPDATE users SET is_active = CASE WHEN is_active = 1 THEN 0 ELSE 1 END WHERE username = ?"
+            ).bind(username).run();
+            return new Response(JSON.stringify({ success: true }), { headers: { "Content-Type": "application/json" } });
+          } else {
+            const { limit_gb, expiry_days, ips, tls, port } = body;
+            await env.DB.prepare(
+              "UPDATE users SET limit_gb = ?, expiry_days = ?, ips = ?, tls = ?, port = ? WHERE username = ?"
+            ).bind(
+              limit_gb ? parseFloat(limit_gb) : null, 
+              expiry_days ? parseInt(expiry_days) : null, 
+              ips || null, 
+              tls, 
+              parseInt(port),
+              username
+            ).run();
+            return new Response(JSON.stringify({ success: true }), { headers: { "Content-Type": "application/json" } });
+          }
         }
 
         if (request.method === 'DELETE') {
@@ -1744,6 +1830,9 @@ body { width: 35em; margin: 0 auto; font-family: Tahoma, Verdana, Arial, sans-se
                 <button onclick="toggleSettingsModal(true)" class="p-2 rounded-lg bg-gray-100 dark:bg-amoled-input border border-gray-200 dark:border-amoled-border hover:bg-gray-200 dark:hover:bg-zinc-800 transition text-gray-600 dark:text-gray-300 shadow-sm" title="تنظیمات">
                     <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z"></path><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"></path></svg>
                 </button>
+                <button onclick="logoutAdmin()" class="p-2 rounded-lg bg-gray-100 dark:bg-amoled-input border border-gray-200 dark:border-amoled-border hover:bg-red-50 dark:hover:bg-red-950/20 transition text-red-600 dark:text-red-400 shadow-sm" title="خروج از حساب">
+                    <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M17 16l4-4m0 0l-4-4m4 4H7m6 4v1a3 3 0 01-3 3H6a3 3 0 01-3-3V7a3 3 0 013-3h4a3 3 0 013 3v1"></path></svg>
+                </button>
                 <button onclick="openCreateModal()" class="flex items-center justify-center w-10 h-10 bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-700 hover:to-indigo-700 text-white rounded-full shadow-md hover:shadow-lg hover:scale-110 transition-all duration-300" title="کاربر جدید">
                     <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M12 4v16m8-8H4"></path></svg>
                 </button>
@@ -1814,6 +1903,37 @@ body { width: 35em; margin: 0 auto; font-family: Tahoma, Verdana, Arial, sans-se
         <div id="loading-state" class="text-center py-12">
             <span class="text-gray-500 dark:text-gray-400">در حال بارگذاری کاربران...</span>
         </div>
+
+        <div class="mb-6 flex flex-col md:flex-row gap-4 justify-between items-center bg-white dark:bg-amoled-card border border-gray-200 dark:border-amoled-border rounded-2xl p-4 shadow-sm">
+            <!-- Search Box -->
+            <div class="relative w-full md:w-80">
+                <input type="text" id="search-input" oninput="filterAndRenderUsers()" placeholder="جستجوی نام کاربری یا UUID..." class="w-full pl-3 pr-9 py-2.5 bg-gray-50 dark:bg-amoled-input border border-gray-300 dark:border-amoled-border rounded-xl focus:outline-none focus:ring-2 focus:ring-blue-500 text-sm">
+                <div class="absolute inset-y-0 right-0 flex items-center pr-3 pointer-events-none text-gray-400">
+                    <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"></path></svg>
+                </div>
+            </div>
+            <!-- Filters & Sorting -->
+            <div class="flex flex-wrap items-center gap-3 w-full md:w-auto">
+                <!-- Status Filter -->
+                <select id="filter-status" onchange="filterAndRenderUsers()" class="px-3 py-2.5 bg-gray-50 dark:bg-amoled-input border border-gray-300 dark:border-amoled-border rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 text-gray-700 dark:text-zinc-300 cursor-pointer">
+                    <option value="all">🔍 همه وضعیت‌ها</option>
+                    <option value="active">✅ فعال</option>
+                    <option value="inactive">❌ غیرفعال</option>
+                    <option value="online">⚡ آنلاین</option>
+                    <option value="offline">💤 آفلاین</option>
+                    <option value="expired">⏳ منقضی شده / تمام شده</option>
+                </select>
+                <!-- Sorting -->
+                <select id="sort-users" onchange="filterAndRenderUsers()" class="px-3 py-2.5 bg-gray-50 dark:bg-amoled-input border border-gray-300 dark:border-amoled-border rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 text-gray-700 dark:text-zinc-300 cursor-pointer">
+                    <option value="newest">📅 جدیدترین</option>
+                    <option value="name">🔤 نام کاربری (الفبا)</option>
+                    <option value="usage-desc">📊 بیشترین مصرف</option>
+                    <option value="usage-asc">📈 کمترین مصرف</option>
+                    <option value="expiry-asc">⏳ کمترین زمان باقی‌مانده</option>
+                </select>
+            </div>
+        </div>
+
         <h2 class="text-lg font-bold mb-4 text-gray-800 dark:text-zinc-200">لیست کاربران</h2>
         
         <div id="users-table-container" class="hidden overflow-x-auto border border-gray-200 dark:border-amoled-border rounded-xl bg-white dark:bg-amoled-card">
@@ -1925,6 +2045,21 @@ body { width: 35em; margin: 0 auto; font-family: Tahoma, Verdana, Arial, sans-se
                     <div>
                         <label class="block text-sm font-medium mb-1.5 text-gray-700 dark:text-zinc-300">Fragment Interval</label>
                         <input type="text" id="frag-interval" placeholder="1-2" class="w-full px-3 py-2.5 bg-white dark:bg-amoled-input border border-gray-300 dark:border-amoled-border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 text-sm text-center font-mono" dir="ltr">
+                    </div>
+                </div>
+                <!-- Change Password Section -->
+                <div class="pt-4 border-t border-gray-100 dark:border-zinc-800">
+                    <h4 class="text-sm font-bold mb-3 text-gray-800 dark:text-zinc-200">🔒 تغییر رمز عبور مدیریت</h4>
+                    <div class="space-y-3">
+                        <div>
+                            <label class="block text-[11px] text-gray-500 dark:text-gray-400 font-medium mb-1">رمز عبور فعلی</label>
+                            <input type="password" id="change-pwd-current" class="w-full px-3 py-2 bg-white dark:bg-amoled-input border border-gray-300 dark:border-amoled-border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 text-xs font-mono text-center">
+                        </div>
+                        <div>
+                            <label class="block text-[11px] text-gray-500 dark:text-gray-400 font-medium mb-1">رمز عبور جدید</label>
+                            <input type="password" id="change-pwd-new" class="w-full px-3 py-2 bg-white dark:bg-amoled-input border border-gray-300 dark:border-amoled-border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 text-xs font-mono text-center">
+                        </div>
+                        <button type="button" onclick="changeAdminPassword()" id="change-pwd-btn" class="w-full py-2 bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-700 hover:to-indigo-700 text-white font-semibold rounded-lg text-xs transition-all shadow-sm">تغییر رمز عبور</button>
                     </div>
                 </div>
                 <div class="pt-4 flex gap-3">
@@ -2048,15 +2183,11 @@ body { width: 35em; margin: 0 auto; font-family: Tahoma, Verdana, Arial, sans-se
 
         function renderUsersUI(data) {
             try {
-                const loadingState = document.getElementById('loading-state');
-                const tableContainer = document.getElementById('users-table-container');
-                const emptyState = document.getElementById('empty-state');
-                const tbody = document.getElementById('users-tbody');
-                
                 const users = data.users || [];
                 window.allUsers = users;
-                
                 const serverTime = data.serverTime || Date.now();
+                window.lastServerTime = serverTime;
+                
                 const totalUsersCount = users.length;
                 const activeUsersCount = users.filter(u => u.is_online === 1).length;
                 const totalGbUsage = users.reduce((sum, u) => sum + (u.used_gb || 0), 0);
@@ -2070,136 +2201,251 @@ body { width: 35em; margin: 0 auto; font-family: Tahoma, Verdana, Arial, sans-se
                 const topUsage = topUser.used_gb || 0;
                 document.getElementById('stat-top-user-usage').innerText = topUsage < 1 ? (topUsage * 1024).toFixed(0) + ' MB مصرف شده' : topUsage.toFixed(2) + ' GB مصرف شده';
 
-                if (users.length === 0) {
-                    loadingState.classList.add('hidden');
-                    emptyState.classList.remove('hidden');
-                    tableContainer.classList.add('hidden');
-                } else {
-                    emptyState.classList.add('hidden');
-                    tbody.innerHTML = users.map(user => {
-                        const createdDate = user.created_at ? new Date(user.created_at).toLocaleDateString('fa-IR') : '-';
-                        let daysRemaining = 'نامحدود';
-                        let daysPercent = 100;
-                        if (user.expiry_days) {
-                            if (user.created_at) {
-                                const created = new Date(user.created_at);
-                                const expiryDate = new Date(created.getTime() + (user.expiry_days * 24 * 60 * 60 * 1000));
-                                const diffDays = Math.ceil((expiryDate - new Date(serverTime)) / (1000 * 60 * 60 * 24));
-                                daysRemaining = diffDays > 0 ? diffDays : 0;
-                                daysPercent = Math.max(0, Math.min(100, (daysRemaining / user.expiry_days) * 100));
-                            } else {
-                                daysRemaining = user.expiry_days;
-                            }
-                        }
-
-                        const usedGb = user.used_gb || 0;
-                        const formattedUsed = usedGb < 1 ? (usedGb * 1024).toFixed(0) + ' MB' : usedGb.toFixed(2) + ' GB';
-
-                        let volumeHtml = '';
-                        if (user.limit_gb) {
-                            const limitPercent = Math.min((usedGb / user.limit_gb) * 100, 100);
-                            const limitHue = 120 - (limitPercent * 1.2);
-                            const formattedLimit = user.limit_gb < 1 ? (user.limit_gb * 1024).toFixed(0) + ' MB' : user.limit_gb + ' GB';
-                            volumeHtml = '<div class="flex flex-col gap-1.5 w-full min-w-[130px]">' +
-                                '<div class="flex justify-between text-[11px] text-gray-500 dark:text-gray-400 font-medium">' +
-                                    '<span>مصرف: ' + formattedUsed + '</span>' +
-                                    '<span>کل: ' + formattedLimit + '</span>' +
-                                '</div>' +
-                                '<div class="w-full bg-gray-200 dark:bg-zinc-700 rounded-full h-1.5 overflow-hidden">' +
-                                    '<div class="h-1.5 rounded-full transition-all duration-500" style="width: ' + limitPercent + '%; background-color: hsl(' + limitHue + ', 80%, 45%)"></div>' +
-                                '</div>' +
-                            '</div>';
-                        } else {
-                            volumeHtml = '<div class="flex flex-col gap-1.5 w-full min-w-[130px]">' +
-                                '<div class="flex justify-between text-[11px] text-gray-500 dark:text-gray-400 font-medium">' +
-                                    '<span>مصرف: ' + formattedUsed + '</span>' +
-                                    '<span>کل: نامحدود</span>' +
-                                '</div>' +
-                                '<div class="w-full bg-gray-200 dark:bg-zinc-700 rounded-full h-1.5 overflow-hidden">' +
-                                    '<div class="bg-blue-500 h-1.5 rounded-full transition-all duration-500" style="width: 100%"></div>' +
-                                '</div>' +
-                            '</div>';
-                        }
-
-                        let expiryHtml = '';
-                        if (user.expiry_days) {
-                            const expiryHue = daysPercent * 1.2;
-                            expiryHtml = '<div class="flex flex-col gap-1.5 w-full min-w-[130px]">' +
-                                '<div class="flex justify-between text-[11px] text-gray-500 dark:text-gray-400 font-medium">' +
-                                    '<span>باقی‌مانده: ' + daysRemaining + ' روز</span>' +
-                                    '<span>کل: ' + user.expiry_days + ' روز</span>' +
-                                '</div>' +
-                                '<div class="w-full bg-gray-200 dark:bg-zinc-700 rounded-full h-1.5 overflow-hidden flex justify-end">' +
-                                    '<div class="h-1.5 rounded-full transition-all duration-500" style="width: ' + daysPercent + '%; background-color: hsl(' + expiryHue + ', 80%, 45%)"></div>' +
-                                '</div>' +
-                            '</div>';
-                        } else {
-                            expiryHtml = '<div class="flex flex-col gap-1.5 w-full min-w-[130px]">' +
-                                '<div class="flex justify-between text-[11px] text-gray-500 dark:text-gray-400 font-medium">' +
-                                    '<span>باقی‌مانده: نامحدود</span>' +
-                                    '<span>کل: نامحدود</span>' +
-                                '</div>' +
-                                '<div class="w-full bg-gray-200 dark:bg-zinc-700 rounded-full h-1.5 overflow-hidden flex justify-end">' +
-                                    '<div class="bg-blue-500 h-1.5 rounded-full transition-all duration-500" style="width: 100%"></div>' +
-                                '</div>' +
-                            '</div>';
-                        }
-
-                        return '<tr class="hover:bg-gray-50 dark:hover:bg-zinc-900/40 border-b border-gray-100 dark:border-zinc-800 last:border-0">' +
-                                '<td class="p-4">' +
-                                    '<div class="flex flex-col gap-3">' +
-                                        '<div class="flex items-center gap-2">' +
-                                            '<span class="font-bold text-gray-900 dark:text-zinc-100">' + user.username + '</span>' +
-                                            (user.is_active === 0 ? '<span class="px-1.5 py-0.5 text-[10px] font-medium bg-red-100 text-red-800 dark:bg-red-900/30 dark:text-red-400 rounded-md">قطع</span>' : '<span class="px-1.5 py-0.5 text-[10px] font-medium bg-green-100 text-green-800 dark:bg-green-900/30 dark:text-green-400 rounded-md">فعال</span>') +
-                                            (user.is_online === 1 ? '<span class="px-1.5 py-0.5 text-[10px] font-medium bg-emerald-500 text-white rounded-md animate-pulse">● آنلاین</span>' : '<span class="px-1.5 py-0.5 text-[10px] font-medium bg-gray-200 text-gray-600 dark:bg-zinc-800 dark:text-zinc-400 rounded-md">آفلاین</span>') +
-                                        '</div>' +
-                                        '<div class="flex gap-1.5">' +
-                                            '<button onclick="copyConfig(\\'' + encodeURIComponent(user.username) + '\\')" title="کپی کانفیگ" class="p-1.5 bg-white dark:bg-zinc-800 border border-gray-200 dark:border-zinc-700 hover:bg-blue-50 dark:hover:bg-blue-900/30 text-blue-600 dark:text-blue-400 rounded-md transition shadow-sm"><svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z"></path></svg></button>' +
-                                            '<button onclick="copyJsonConfig(\\'' + encodeURIComponent(user.username) + '\\')" title="کپی JSON" class="p-1.5 bg-white dark:bg-zinc-800 border border-gray-200 dark:border-zinc-700 hover:bg-purple-50 dark:hover:bg-purple-900/30 text-purple-600 dark:text-purple-400 rounded-md transition shadow-sm"><svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10 20l4-16m4 4l4 4-4 4M6 16l-4-4 4-4"></path></svg></button>' +
-                                            '<button onclick="showQR(\\'' + encodeURIComponent(user.username) + '\\')" title="کد QR" class="p-1.5 bg-white dark:bg-zinc-800 border border-gray-200 dark:border-zinc-700 hover:bg-green-50 dark:hover:bg-green-900/30 text-green-600 dark:text-green-400 rounded-md transition shadow-sm"><svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v1m6 11h2m-6 0h-2v4m0-11v3m0 0h.01M12 12h4.01M16 20h4M4 12h4m12 0h.01M5 8h2a1 1 0 001-1V5a1 1 0 00-1-1H5a1 1 0 00-1 1v2a1 1 0 001 1zm14 0h2a1 1 0 001-1V5a1 1 0 00-1-1h-2a1 1 0 00-1 1v2a1 1 0 001 1zM5 20h2a1 1 0 001-1v-2a1 1 0 00-1-1H5a1 1 0 00-1 1v2a1 1 0 001 1z"></path></svg></button>' +
-                                            '<button onclick="editUser(\\'' + encodeURIComponent(user.username) + '\\')" title="ویرایش" class="p-1.5 bg-white dark:bg-zinc-800 border border-gray-200 dark:border-zinc-700 hover:bg-yellow-50 dark:hover:bg-yellow-900/30 text-yellow-600 dark:text-yellow-400 rounded-md transition shadow-sm"><svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z"></path></svg></button>' +
-                                            '<button onclick="deleteUser(\\'' + encodeURIComponent(user.username) + '\\')" title="حذف" class="p-1.5 bg-white dark:bg-zinc-800 border border-gray-200 dark:border-zinc-700 hover:bg-red-50 dark:hover:bg-red-900/30 text-red-600 dark:text-red-400 rounded-md transition shadow-sm"><svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"></path></svg></button>' +
-                                        '</div>' +
-                                    '</div>' +
-                                '</td>' +
-                                '<td class="p-4">' +
-                                    '<div class="flex flex-col gap-2 min-w-[140px]">' +
-                                        '<div class="flex gap-1">' +
-                                            '<button onclick="copySubLink(\\'' + encodeURIComponent(user.username) + '\\')" class="flex-1 flex items-center justify-center gap-1.5 px-2 py-1.5 bg-indigo-50 dark:bg-indigo-900/30 text-indigo-600 dark:text-indigo-400 hover:bg-indigo-100 dark:hover:bg-indigo-900/50 rounded-lg text-xs font-bold transition border border-indigo-200 dark:border-indigo-800">' +
-                                                '<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13.828 10.172a4 4 0 00-5.656 0l-4 4a4 4 0 105.656 5.656l1.102-1.101m-.758-4.899a4 4 0 005.656 0l4-4a4 4 0 00-5.656-5.656l-1.1 1.1"></path></svg>' +
-                                                'ساب متنی' +
-                                            '</button>' +
-                                            '<button onclick="showSubQR(\\'' + encodeURIComponent(user.username) + '\\', \\'normal\\')" title="QR ساب متنی" class="px-2 py-1.5 bg-indigo-50 dark:bg-indigo-900/30 text-indigo-600 dark:text-indigo-400 hover:bg-indigo-100 dark:hover:bg-indigo-900/50 rounded-lg text-xs font-bold transition border border-indigo-200 dark:border-indigo-800">' +
-                                                '<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v1m6 11h2m-6 0h-2v4m0-11v3m0 0h.01M12 12h4.01M16 20h4M4 12h4m12 0h.01M5 8h2a1 1 0 001-1V5a1 1 0 00-1-1H5a1 1 0 00-1 1v2a1 1 0 001 1zm14 0h2a1 1 0 001-1V5a1 1 0 00-1-1h-2a1 1 0 00-1 1v2a1 1 0 001 1zM5 20h2a1 1 0 001-1v-2a1 1 0 00-1-1H5a1 1 0 00-1 1v2a1 1 0 001 1z"></path></svg>' +
-                                            '</button>' +
-                                        '</div>' +
-                                        '<div class="flex gap-1">' +
-                                            '<button onclick="copyJsonSubLink(\\'' + encodeURIComponent(user.username) + '\\')" class="flex-1 flex items-center justify-center gap-1.5 px-2 py-1.5 bg-purple-50 dark:bg-purple-900/30 text-purple-600 dark:text-purple-400 hover:bg-purple-100 dark:hover:bg-purple-900/50 rounded-lg text-xs font-bold transition border border-purple-200 dark:border-purple-800">' +
-                                                '<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10 20l4-16m4 4l4 4-4 4M6 16l-4-4 4-4"></path></svg>' +
-                                                'ساب JSON' +
-                                            '</button>' +
-                                            '<button onclick="showSubQR(\\'' + encodeURIComponent(user.username) + '\\', \\'json\\')" title="QR ساب JSON" class="px-2 py-1.5 bg-purple-50 dark:bg-purple-900/30 text-purple-600 dark:text-purple-400 hover:bg-purple-100 dark:hover:bg-purple-900/50 rounded-lg text-xs font-bold transition border border-purple-200 dark:border-purple-800">' +
-                                                '<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v1m6 11h2m-6 0h-2v4m0-11v3m0 0h.01M12 12h4.01M16 20h4M4 12h4m12 0h.01M5 8h2a1 1 0 001-1V5a1 1 0 00-1-1H5a1 1 0 00-1 1v2a1 1 0 001 1zm14 0h2a1 1 0 001-1V5a1 1 0 00-1-1h-2a1 1 0 00-1 1v2a1 1 0 001 1zM5 20h2a1 1 0 001-1v-2a1 1 0 00-1-1H5a1 1 0 00-1 1v2a1 1 0 001 1z"></path></svg>' +
-                                            '</button>' +
-                                        '</div>' +
-                                    '</div>' +
-                                '</td>' +
-                                '<td class="p-4 text-xs font-mono uppercase text-blue-500 font-semibold">VL' + 'ESS</td>' +
-                                '<td class="p-4 text-xs">' + user.port + ' (' + (user.tls === 'on' ? 'TLS' : 'بدون TLS') + ')</td>' +
-                                '<td class="p-4">' + volumeHtml + '</td>' +
-                                '<td class="p-4">' + expiryHtml + '</td>' +
-                                '<td class="p-4 text-xs text-gray-500">' + createdDate + '</td>' +
-                            '</tr>';
-                    }).join('');
-                    
-                    loadingState.classList.add('hidden');
-                    tableContainer.classList.remove('hidden');
-                }
+                filterAndRenderUsers();
             } catch (err) {
-                loadingState.innerHTML = '<span class="text-red-500">خطا در بارگذاری عناصر صفحه</span>';
+                document.getElementById('loading-state').innerHTML = '<span class="text-red-500">خطا در پردازش اطلاعات کاربران</span>';
             }
         }
 
+        function filterAndRenderUsers() {
+            if (!window.allUsers) return;
+            const searchQuery = (document.getElementById('search-input').value || '').toLowerCase().trim();
+            const filterStatus = document.getElementById('filter-status').value;
+            const sortVal = document.getElementById('sort-users').value;
+            const serverTime = window.lastServerTime || Date.now();
+            
+            let filtered = [...window.allUsers];
+            
+            // Search filter
+            if (searchQuery) {
+                filtered = filtered.filter(u => 
+                    (u.username || '').toLowerCase().includes(searchQuery) || 
+                    (u.uuid || '').toLowerCase().includes(searchQuery)
+                );
+            }
+            
+            // Status filter
+            if (filterStatus !== 'all') {
+                filtered = filtered.filter(u => {
+                    const isOnline = u.is_online === 1;
+                    const isActive = u.is_active === 1;
+                    
+                    let isExpired = false;
+                    if (u.limit_gb && u.used_gb >= u.limit_gb) isExpired = true;
+                    if (u.expiry_days && u.created_at) {
+                        const created = new Date(u.created_at);
+                        const expiryDate = new Date(created.getTime() + (u.expiry_days * 24 * 60 * 60 * 1000));
+                        if (new Date(serverTime) > expiryDate) isExpired = true;
+                    }
+                    
+                    if (filterStatus === 'active') return isActive && !isExpired;
+                    if (filterStatus === 'inactive') return !isActive;
+                    if (filterStatus === 'online') return isOnline;
+                    if (filterStatus === 'offline') return !isOnline;
+                    if (filterStatus === 'expired') return isExpired || !isActive;
+                    return true;
+                });
+            }
+            
+            // Sort
+            filtered.sort((a, b) => {
+                if (sortVal === 'newest') {
+                    return b.id - a.id;
+                }
+                if (sortVal === 'name') {
+                    return (a.username || '').localeCompare(b.username || '');
+                }
+                if (sortVal === 'usage-desc') {
+                    return (b.used_gb || 0) - (a.used_gb || 0);
+                }
+                if (sortVal === 'usage-asc') {
+                    return (a.used_gb || 0) - (b.used_gb || 0);
+                }
+                if (sortVal === 'expiry-asc') {
+                    const getRemaining = (u) => {
+                        if (!u.expiry_days) return Infinity;
+                        if (!u.created_at) return Infinity;
+                        const created = new Date(u.created_at);
+                        const expiryDate = new Date(created.getTime() + (u.expiry_days * 24 * 60 * 60 * 1000));
+                        return expiryDate - new Date(serverTime);
+                    };
+                    return getRemaining(a) - getRemaining(b);
+                }
+                return 0;
+            });
+            
+            renderFilteredUsers(filtered, serverTime);
+        }
+
+        function renderFilteredUsers(users, serverTime) {
+            const loadingState = document.getElementById('loading-state');
+            const tableContainer = document.getElementById('users-table-container');
+            const emptyState = document.getElementById('empty-state');
+            const tbody = document.getElementById('users-tbody');
+            
+            if (users.length === 0) {
+                loadingState.classList.add('hidden');
+                emptyState.classList.remove('hidden');
+                tableContainer.classList.add('hidden');
+                if (window.allUsers && window.allUsers.length > 0) {
+                    emptyState.querySelector('p').innerText = 'کاربری با مشخصات جستجو شده یافت نشد.';
+                } else {
+                    emptyState.querySelector('p').innerText = 'کاربری وجود ندارد. برای ساخت اولین کاربر روی دکمه «افزودن کاربر جدید» کلیک کنید.';
+                }
+            } else {
+                loadingState.classList.add('hidden');
+                emptyState.classList.add('hidden');
+                tableContainer.classList.remove('hidden');
+                
+                tbody.innerHTML = users.map(user => {
+                    const createdDate = user.created_at ? new Date(user.created_at).toLocaleDateString('fa-IR') : '-';
+                    let daysRemaining = 'نامحدود';
+                    let daysPercent = 100;
+                    if (user.expiry_days) {
+                        if (user.created_at) {
+                            const created = new Date(user.created_at);
+                            const expiryDate = new Date(created.getTime() + (user.expiry_days * 24 * 60 * 60 * 1000));
+                            const diffDays = Math.ceil((expiryDate - new Date(serverTime)) / (1000 * 60 * 60 * 24));
+                            daysRemaining = diffDays > 0 ? diffDays : 0;
+                            daysPercent = Math.max(0, Math.min(100, (daysRemaining / user.expiry_days) * 100));
+                        } else {
+                            daysRemaining = user.expiry_days;
+                        }
+                    }
+
+                    const usedGb = user.used_gb || 0;
+                    const formattedUsed = usedGb < 1 ? (usedGb * 1024).toFixed(0) + ' MB' : usedGb.toFixed(2) + ' GB';
+
+                    let volumeHtml = '';
+                    if (user.limit_gb) {
+                        const limitPercent = Math.min((usedGb / user.limit_gb) * 100, 100);
+                        const limitHue = 120 - (limitPercent * 1.2);
+                        const formattedLimit = user.limit_gb < 1 ? (user.limit_gb * 1024).toFixed(0) + ' MB' : user.limit_gb + ' GB';
+                        volumeHtml = '<div class="flex flex-col gap-1.5 w-full min-w-[130px]">' +
+                            '<div class="flex justify-between text-[11px] text-gray-500 dark:text-gray-400 font-medium">' +
+                                '<span>مصرف: ' + formattedUsed + '</span>' +
+                                '<span>کل: ' + formattedLimit + '</span>' +
+                            '</div>' +
+                            '<div class="w-full bg-gray-200 dark:bg-zinc-700 rounded-full h-1.5 overflow-hidden">' +
+                                '<div class="h-1.5 rounded-full transition-all duration-500" style="width: ' + limitPercent + '%; background-color: hsl(' + limitHue + ', 80%, 45%)"></div>' +
+                            '</div>' +
+                        '</div>';
+                    } else {
+                        volumeHtml = '<div class="flex flex-col gap-1.5 w-full min-w-[130px]">' +
+                            '<div class="flex justify-between text-[11px] text-gray-500 dark:text-gray-400 font-medium">' +
+                                '<span>مصرف: ' + formattedUsed + '</span>' +
+                                '<span>کل: نامحدود</span>' +
+                            '</div>' +
+                            '<div class="w-full bg-gray-200 dark:bg-zinc-700 rounded-full h-1.5 overflow-hidden">' +
+                                '<div class="bg-blue-500 h-1.5 rounded-full transition-all duration-500" style="width: 100%"></div>' +
+                            '</div>' +
+                        '</div>';
+                    }
+
+                    let expiryHtml = '';
+                    if (user.expiry_days) {
+                        const expiryHue = daysPercent * 1.2;
+                        expiryHtml = '<div class="flex flex-col gap-1.5 w-full min-w-[130px]">' +
+                            '<div class="flex justify-between text-[11px] text-gray-500 dark:text-gray-400 font-medium">' +
+                                '<span>باقی‌مانده: ' + daysRemaining + ' روز</span>' +
+                                '<span>کل: ' + user.expiry_days + ' روز</span>' +
+                            '</div>' +
+                            '<div class="w-full bg-gray-200 dark:bg-zinc-700 rounded-full h-1.5 overflow-hidden flex justify-end">' +
+                                '<div class="h-1.5 rounded-full transition-all duration-500" style="width: ' + daysPercent + '%; background-color: hsl(' + expiryHue + ', 80%, 45%)"></div>' +
+                            '</div>' +
+                        '</div>';
+                    } else {
+                        expiryHtml = '<div class="flex flex-col gap-1.5 w-full min-w-[130px]">' +
+                            '<div class="flex justify-between text-[11px] text-gray-500 dark:text-gray-400 font-medium">' +
+                                '<span>باقی‌مانده: نامحدود</span>' +
+                                '<span>کل: نامحدود</span>' +
+                            '</div>' +
+                            '<div class="w-full bg-gray-200 dark:bg-zinc-700 rounded-full h-1.5 overflow-hidden flex justify-end">' +
+                                '<div class="bg-blue-500 h-1.5 rounded-full transition-all duration-500" style="width: 100%"></div>' +
+                            '</div>' +
+                        '</div>';
+                    }
+
+                    const statusBtnColor = user.is_active === 0 ? 'text-emerald-600 dark:text-emerald-400 hover:bg-emerald-50 dark:hover:bg-emerald-900/30' : 'text-amber-600 dark:text-amber-400 hover:bg-amber-50 dark:hover:bg-amber-900/30';
+                    const statusBtnTitle = user.is_active === 0 ? 'فعال کردن کاربر' : 'قطع کردن کاربر';
+                    const statusBtnIcon = user.is_active === 0 
+                        ? '<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M14.752 11.168l-3.197-2.132A1 1 0 0010 9.87v4.263a1 1 0 001.555.832l3.197-2.132a1 1 0 000-1.664z"></path><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 12a9 9 0 11-18 0 9 9 0 0118 0z"></path></svg>'
+                        : '<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10 9v6m4-6v6m7-3a9 9 0 11-18 0 9 9 0 0118 0z"></path></svg>';
+
+                    return '<tr class="hover:bg-gray-50 dark:hover:bg-zinc-900/40 border-b border-gray-100 dark:border-zinc-800 last:border-0">' +
+                            '<td class="p-4">' +
+                                '<div class="flex flex-col gap-3">' +
+                                    '<div class="flex items-center gap-2">' +
+                                        '<span class="font-bold text-gray-900 dark:text-zinc-100">' + user.username + '</span>' +
+                                        (user.is_active === 0 ? '<span class="px-1.5 py-0.5 text-[10px] font-medium bg-red-100 text-red-800 dark:bg-red-900/30 dark:text-red-400 rounded-md">قطع</span>' : '<span class="px-1.5 py-0.5 text-[10px] font-medium bg-green-100 text-green-800 dark:bg-green-900/30 dark:text-green-400 rounded-md">فعال</span>') +
+                                        (user.is_online === 1 ? '<span class="px-1.5 py-0.5 text-[10px] font-medium bg-emerald-500 text-white rounded-md animate-pulse">● آنلاین</span>' : '<span class="px-1.5 py-0.5 text-[10px] font-medium bg-gray-200 text-gray-600 dark:bg-zinc-800 dark:text-zinc-400 rounded-md">آفلاین</span>') +
+                                    '</div>' +
+                                    '<div class="flex gap-1.5">' +
+                                        '<button onclick="copyConfig(\\'' + encodeURIComponent(user.username) + '\\')" title="کپی کانفیگ" class="p-1.5 bg-white dark:bg-zinc-800 border border-gray-200 dark:border-zinc-700 hover:bg-blue-50 dark:hover:bg-blue-900/30 text-blue-600 dark:text-blue-400 rounded-md transition shadow-sm"><svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z"></path></svg></button>' +
+                                        '<button onclick="copyJsonConfig(\\'' + encodeURIComponent(user.username) + '\\')" title="کپی JSON" class="p-1.5 bg-white dark:bg-zinc-800 border border-gray-200 dark:border-zinc-700 hover:bg-purple-50 dark:hover:bg-purple-900/30 text-purple-600 dark:text-purple-400 rounded-md transition shadow-sm"><svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10 20l4-16m4 4l4 4-4 4M6 16l-4-4 4-4"></path></svg></button>' +
+                                        '<button onclick="showQR(\\'' + encodeURIComponent(user.username) + '\\')" title="کد QR" class="p-1.5 bg-white dark:bg-zinc-800 border border-gray-200 dark:border-zinc-700 hover:bg-green-50 dark:hover:bg-green-900/30 text-green-600 dark:text-green-400 rounded-md transition shadow-sm"><svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v1m6 11h2m-6 0h-2v4m0-11v3m0 0h.01M12 12h4.01M16 20h4M4 12h4m12 0h.01M5 8h2a1 1 0 001-1V5a1 1 0 00-1-1H5a1 1 0 00-1 1v2a1 1 0 001 1zm14 0h2a1 1 0 001-1V5a1 1 0 00-1-1h-2a1 1 0 00-1 1v2a1 1 0 001 1zM5 20h2a1 1 0 001-1v-2a1 1 0 00-1-1H5a1 1 0 00-1 1v2a1 1 0 001 1z"></path></svg></button>' +
+                                        '<button onclick="toggleUserStatus(\\'' + encodeURIComponent(user.username) + '\\')" title="' + statusBtnTitle + '" class="p-1.5 bg-white dark:bg-zinc-800 border border-gray-200 dark:border-zinc-700 ' + statusBtnColor + ' rounded-md transition shadow-sm">' + statusBtnIcon + '</button>' +
+                                        '<button onclick="editUser(\\'' + encodeURIComponent(user.username) + '\\')" title="ویرایش" class="p-1.5 bg-white dark:bg-zinc-800 border border-gray-200 dark:border-zinc-700 hover:bg-yellow-50 dark:hover:bg-yellow-900/30 text-yellow-600 dark:text-yellow-400 rounded-md transition shadow-sm"><svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z"></path></svg></button>' +
+                                        '<button onclick="deleteUser(\\'' + encodeURIComponent(user.username) + '\\')" title="حذف" class="p-1.5 bg-white dark:bg-zinc-800 border border-gray-200 dark:border-zinc-700 hover:bg-red-50 dark:hover:bg-red-950/20 text-red-600 dark:text-red-400 rounded-md transition shadow-sm"><svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"></path></svg></button>' +
+                                    '</div>' +
+                                '</div>' +
+                            '</td>' +
+                            '<td class="p-4">' +
+                                '<div class="flex flex-col gap-2 min-w-[140px]">' +
+                                    '<div class="flex gap-1">' +
+                                        '<button onclick="copySubLink(\\'' + encodeURIComponent(user.username) + '\\')" class="flex-1 flex items-center justify-center gap-1.5 px-2 py-1.5 bg-indigo-50 dark:bg-indigo-900/30 text-indigo-600 dark:text-indigo-400 hover:bg-indigo-100 dark:hover:bg-indigo-900/50 rounded-lg text-xs font-bold transition border border-indigo-200 dark:border-indigo-800">' +
+                                            '<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13.828 10.172a4 4 0 00-5.656 0l-4 4a4 4 0 105.656 5.656l1.102-1.101m-.758-4.899a4 4 0 005.656 0l4-4a4 4 0 00-5.656-5.656l-1.1 1.1"></path></svg>' +
+                                            'ساب متنی' +
+                                        '</button>' +
+                                        '<button onclick="showSubQR(\\'' + encodeURIComponent(user.username) + '\\', \\'normal\\')" title="QR ساب متنی" class="px-2 py-1.5 bg-indigo-50 dark:bg-indigo-900/30 text-indigo-600 dark:text-indigo-400 hover:bg-indigo-100 dark:hover:bg-indigo-900/50 rounded-lg text-xs font-bold transition border border-indigo-200 dark:border-indigo-800">' +
+                                            '<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v1m6 11h2m-6 0h-2v4m0-11v3m0 0h.01M12 12h4.01M16 20h4M4 12h4m12 0h.01M5 8h2a1 1 0 001-1V5a1 1 0 00-1-1H5a1 1 0 00-1 1v2a1 1 0 001 1zm14 0h2a1 1 0 001-1V5a1 1 0 00-1-1h-2a1 1 0 00-1 1v2a1 1 0 001 1zM5 20h2a1 1 0 001-1v-2a1 1 0 00-1-1H5a1 1 0 00-1 1v2a1 1 0 001 1z"></path></svg>' +
+                                        '</button>' +
+                                    '</div>' +
+                                    '<div class="flex gap-1">' +
+                                        '<button onclick="copyJsonSubLink(\\'' + encodeURIComponent(user.username) + '\\')" class="flex-1 flex items-center justify-center gap-1.5 px-2 py-1.5 bg-purple-50 dark:bg-purple-900/30 text-purple-600 dark:text-purple-400 hover:bg-purple-100 dark:hover:bg-purple-900/50 rounded-lg text-xs font-bold transition border border-purple-200 dark:border-purple-800">' +
+                                            '<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10 20l4-16m4 4l4 4-4 4M6 16l-4-4 4-4"></path></svg>' +
+                                            'ساب JSON' +
+                                        '</button>' +
+                                        '<button onclick="showSubQR(\\'' + encodeURIComponent(user.username) + '\\', \\'json\\')" title="QR ساب JSON" class="px-2 py-1.5 bg-purple-50 dark:bg-purple-900/30 text-purple-600 dark:text-purple-400 hover:bg-purple-100 dark:hover:bg-purple-900/50 rounded-lg text-xs font-bold transition border border-purple-200 dark:border-purple-800">' +
+                                            '<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v1m6 11h2m-6 0h-2v4m0-11v3m0 0h.01M12 12h4.01M16 20h4M4 12h4m12 0h.01M5 8h2a1 1 0 001-1V5a1 1 0 00-1-1H5a1 1 0 00-1 1v2a1 1 0 001 1zm14 0h2a1 1 0 001-1V5a1 1 0 00-1-1h-2a1 1 0 00-1 1v2a1 1 0 001 1zM5 20h2a1 1 0 001-1v-2a1 1 0 00-1-1H5a1 1 0 00-1 1v2a1 1 0 001 1z"></path></svg>' +
+                                        '</button>' +
+                                    '</div>' +
+                                    '<div class="flex gap-1">' +
+                                        '<button onclick="copyStatusLink(\\'' + encodeURIComponent(user.username) + '\\')" class="flex-1 flex items-center justify-center gap-1.5 px-2 py-1.5 bg-emerald-50 dark:bg-emerald-900/30 text-emerald-600 dark:text-emerald-400 hover:bg-emerald-100 dark:hover:bg-emerald-900/50 rounded-lg text-xs font-bold transition border border-emerald-200 dark:border-emerald-800">' +
+                                            '<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14"></path></svg>' +
+                                            'صفحه وضعیت' +
+                                        '</button>' +
+                                    '</div>' +
+                                '</div>' +
+                            '</td>' +
+                            '<td class="p-4 text-xs font-mono uppercase text-blue-500 font-semibold">VLESS</td>' +
+                            '<td class="p-4 text-xs">' + user.port + ' (' + (user.tls === 'on' ? 'TLS' : 'بدون TLS') + ')</td>' +
+                            '<td class="p-4">' + volumeHtml + '</td>' +
+                            '<td class="p-4">' + expiryHtml + '</td>' +
+                            '<td class="p-4 text-xs text-gray-500">' + createdDate + '</td>' +
+                        '</tr>';
+                }).join('');
+            }
+        }
+
+        async function toggleUserStatus(encodedUsername) {
+            const username = decodeURIComponent(encodedUsername);
+            try {
+                const response = await fetch('/api/users/' + encodeURIComponent(username), {
+                    method: 'PUT',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ toggle_only: true })
+                });
+                if (response.ok) {
+                    await loadUsers(true);
+                } else {
+                    const errData = await response.json();
+                    alert('خطا: ' + (errData.error || 'عملیات ناموفق بود'));
+                }
+            } catch (err) {
+                alert('خطا در برقراری ارتباط با سرور');
+            }
+        }
         async function handleFormSubmit(event) {
             event.preventDefault();
             const submitButton = document.getElementById('submit-btn');
@@ -2287,12 +2533,25 @@ body { width: 35em; margin: 0 auto; font-family: Tahoma, Verdana, Arial, sans-se
             return window.location.origin + '/feed/json/' + encodeURIComponent(username);
         }
 
+        function getStatusLink(username) {
+            return window.location.origin + '/status/' + encodeURIComponent(username);
+        }
+
         function copySubLink(encodedUsername) {
             const username = decodeURIComponent(encodedUsername);
             navigator.clipboard.writeText(getSubLink(username)).then(() => {
                 alert('✅ لینک ساب متنی با موفقیت کپی شد!');
             }).catch(() => {
                 alert('خطا در کپی کردن لینک ساب!');
+            });
+        }
+
+        function copyStatusLink(encodedUsername) {
+            const username = decodeURIComponent(encodedUsername);
+            navigator.clipboard.writeText(getStatusLink(username)).then(() => {
+                alert('✅ لینک صفحه وضعیت با موفقیت کپی شد!');
+            }).catch(() => {
+                alert('خطا در کپی کردن لینک صفحه وضعیت!');
             });
         }
 
@@ -2606,10 +2865,329 @@ body { width: 35em; margin: 0 auto; font-family: Tahoma, Verdana, Arial, sans-se
             }
         }
 
+        async function changeAdminPassword() {
+            const currentPwd = document.getElementById('change-pwd-current').value;
+            const newPwd = document.getElementById('change-pwd-new').value;
+            const btn = document.getElementById('change-pwd-btn');
+            
+            if (!currentPwd || !newPwd) {
+                alert('⚠️ وارد کردن رمز عبور فعلی و جدید الزامی است!');
+                return;
+            }
+            if (newPwd.length < 4) {
+                alert('⚠️ رمز عبور جدید باید حداقل ۴ کاراکتر باشد!');
+                return;
+            }
+            
+            btn.disabled = true;
+            btn.innerText = 'در حال تغییر...';
+            
+            try {
+                const response = await fetch('/api/change-password', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ current_password: currentPwd, new_password: newPwd })
+                });
+                
+                const data = await response.json();
+                if (response.ok && data.success) {
+                    alert('✅ رمز عبور با موفقیت تغییر کرد.');
+                    document.getElementById('change-pwd-current').value = '';
+                    document.getElementById('change-pwd-new').value = '';
+                    toggleSettingsModal(false);
+                } else {
+                    alert('❌ خطا: ' + (data.error || 'عملیات ناموفق بود'));
+                }
+            } catch (err) {
+                alert('خطا در برقراری ارتباط با سرور');
+            } finally {
+                btn.disabled = false;
+                btn.innerText = 'تغییر رمز عبور';
+            }
+        }
+
+        async function logoutAdmin() {
+            if (confirm('⚠️ آیا می‌خواهید از پنل خارج شوید؟')) {
+                try {
+                    await fetch('/api/logout', { method: 'POST' });
+                } catch (err) {}
+                window.location.reload();
+            }
+        }
+
         document.addEventListener('DOMContentLoaded', () => {
             loadUsers();
             loadLocations();
             setInterval(() => loadUsers(true), 60000);
+        });
+    </script>
+</body>
+</html>`,
+
+  status: `<!DOCTYPE html>
+<html lang="fa" dir="rtl" class="dark">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>وضعیت اشتراک کاربر</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
+    <link href="https://cdn.jsdelivr.net/gh/rastikerdar/vazirmatn@v33.003/Vazirmatn-font-face.css" rel="stylesheet" type="text/css" />
+    <script>
+        tailwind.config = {
+            darkMode: 'class',
+            theme: {
+                extend: {
+                    fontFamily: { sans: ['Vazirmatn', 'sans-serif'] },
+                    colors: { amoled: { bg: '#000000', card: '#0a0a0a', input: '#121212', border: '#1f1f1f' } }
+                }
+            }
+        }
+    </script>
+    <style>
+        body { font-family: 'Vazirmatn', sans-serif; }
+        .glass {
+            background: rgba(10, 10, 10, 0.6);
+            backdrop-filter: blur(12px);
+            -webkit-backdrop-filter: blur(12px);
+            border: 1px solid rgba(255, 255, 255, 0.05);
+        }
+    </style>
+</head>
+<body class="bg-gray-50 text-gray-900 dark:bg-amoled-bg dark:text-zinc-100 min-h-screen flex items-center justify-center p-4">
+    <div class="w-full max-w-xl glass rounded-3xl shadow-2xl p-6 md:p-8 relative overflow-hidden">
+        <!-- Background Orbs -->
+        <div class="absolute -left-12 -top-12 w-40 h-40 bg-blue-500/10 rounded-full blur-3xl pointer-events-none"></div>
+        <div class="absolute -right-12 -bottom-12 w-40 h-40 bg-purple-500/10 rounded-full blur-3xl pointer-events-none"></div>
+
+        <div class="text-center mb-8 relative z-10">
+            <div class="inline-block p-3.5 bg-blue-600/10 text-blue-500 rounded-3xl mb-3 border border-blue-500/20 shadow-lg shadow-blue-500/5">
+                <svg class="w-9 h-9" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M9 12l2 2 4-4m5.618-4.016A11.955 11.955 0 0112 2.944a11.955 11.955 0 01-8.618 3.04A12.02 12.02 0 003 9c0 5.591 3.824 10.29 9 11.622 5.176-1.332 9-6.03 9-11.622 0-1.042-.133-2.052-.382-3.016z"></path></svg>
+            </div>
+            <h1 class="text-xl font-bold tracking-tight text-gray-900 dark:text-white mb-1">پنل زئوس - وضعیت اشتراک</h1>
+            <p id="display-username" class="text-sm font-bold text-blue-500 tracking-wide font-mono"></p>
+        </div>
+
+        <!-- Connection Status -->
+        <div id="status-card" class="mb-6 rounded-2xl p-4 text-center border font-bold relative z-10 transition duration-300">
+            <span id="status-text" class="text-sm">در حال بارگذاری وضعیت...</span>
+        </div>
+
+        <!-- Progress Cards -->
+        <div class="space-y-5 mb-8 relative z-10">
+            <!-- Traffic usage card -->
+            <div class="bg-white/40 dark:bg-zinc-900/30 border border-gray-200 dark:border-amoled-border rounded-2xl p-5 shadow-sm">
+                <div class="flex justify-between items-center mb-3">
+                    <span class="text-xs font-semibold text-gray-500 dark:text-zinc-400 flex items-center gap-1.5">
+                        <svg class="w-4 h-4 text-blue-500" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 11H5m14 0a2 2 0 012 2v6a2 2 0 01-2 2H5a2 2 0 01-2-2v-6a2 2 0 012-2m14 0V9a2 2 0 00-2-2M5 11V9a2 2 0 012-2m0 0V5a2 2 0 012-2h6a2 2 0 012 2v2M7 7h10"></path></svg>
+                        میزان حجم مصرفی
+                    </span>
+                    <span id="volume-pct" class="text-xs font-bold text-blue-500">۰٪</span>
+                </div>
+                <div class="w-full bg-gray-200 dark:bg-zinc-800 rounded-full h-2.5 overflow-hidden mb-3">
+                    <div id="volume-progress" class="bg-blue-600 h-2.5 rounded-full transition-all duration-1000" style="width: 0%"></div>
+                </div>
+                <div class="flex justify-between text-xs text-gray-500 dark:text-zinc-400 font-medium">
+                    <span>مصرف شده: <span id="used-vol" class="font-bold text-gray-800 dark:text-zinc-200">-</span></span>
+                    <span>حجم کل: <span id="limit-vol" class="font-bold text-gray-800 dark:text-zinc-200">-</span></span>
+                </div>
+            </div>
+
+            <!-- Expiry card -->
+            <div class="bg-white/40 dark:bg-zinc-900/30 border border-gray-200 dark:border-amoled-border rounded-2xl p-5 shadow-sm">
+                <div class="flex justify-between items-center mb-3">
+                    <span class="text-xs font-semibold text-gray-500 dark:text-zinc-400 flex items-center gap-1.5">
+                        <svg class="w-4 h-4 text-purple-500" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z"></path></svg>
+                        زمان باقی‌مانده اشتراک
+                    </span>
+                    <span id="expiry-pct" class="text-xs font-bold text-purple-500">۰٪</span>
+                </div>
+                <div class="w-full bg-gray-200 dark:bg-zinc-800 rounded-full h-2.5 overflow-hidden mb-3 flex justify-end">
+                    <div id="expiry-progress" class="bg-purple-600 h-2.5 rounded-full transition-all duration-1000" style="width: 0%"></div>
+                </div>
+                <div class="flex justify-between text-xs text-gray-500 dark:text-zinc-400 font-medium">
+                    <span>باقی‌مانده: <span id="days-remaining" class="font-bold text-gray-800 dark:text-zinc-200">-</span></span>
+                    <span>کل اعتبار: <span id="total-days" class="font-bold text-gray-800 dark:text-zinc-200">-</span></span>
+                </div>
+            </div>
+        </div>
+
+        <!-- Configurations Card -->
+        <div class="border-t border-gray-100 dark:border-zinc-800 pt-6 relative z-10">
+            <h2 class="text-sm font-bold mb-4 flex items-center gap-2">
+                <svg class="w-4 h-4 text-emerald-500" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z"></path></svg>
+                دریافت کانفیگ و اشتراک‌ها
+            </h2>
+            <div class="space-y-3">
+                <button onclick="copyVlessConfig()" class="w-full flex justify-between items-center px-4 py-3 bg-white dark:bg-amoled-card border border-gray-200 dark:border-amoled-border hover:border-blue-500 dark:hover:border-blue-500 rounded-xl text-xs font-medium transition shadow-sm">
+                    <span class="flex items-center gap-2">🚀 کپی کانفیگ VLESS (مستقیم)</span>
+                    <span class="text-blue-500">کپی</span>
+                </button>
+                <button onclick="copyJsonSub()" class="w-full flex justify-between items-center px-4 py-3 bg-white dark:bg-amoled-card border border-gray-200 dark:border-amoled-border hover:border-purple-500 dark:hover:border-purple-500 rounded-xl text-xs font-medium transition shadow-sm">
+                    <span class="flex items-center gap-2">🌐 کپی لینک ساب‌اسکریپشن JSON (نوین)</span>
+                    <span class="text-purple-500">کپی</span>
+                </button>
+                <button onclick="copyTextSub()" class="w-full flex justify-between items-center px-4 py-3 bg-white dark:bg-amoled-card border border-gray-200 dark:border-amoled-border hover:border-indigo-500 dark:hover:border-indigo-500 rounded-xl text-xs font-medium transition shadow-sm">
+                    <span class="flex items-center gap-2">⛓️ کپی لینک ساب‌اسکریپشن متنی</span>
+                    <span class="text-indigo-500">کپی</span>
+                </button>
+                <button onclick="showQR()" class="w-full flex justify-between items-center px-4 py-3 bg-white dark:bg-amoled-card border border-gray-200 dark:border-amoled-border hover:border-emerald-500 dark:hover:border-emerald-500 rounded-xl text-xs font-medium transition shadow-sm">
+                    <span class="flex items-center gap-2">📱 نمایش کد QR کانفیگ VLESS</span>
+                    <span class="text-emerald-500">مشاهده</span>
+                </button>
+            </div>
+        </div>
+    </div>
+
+    <!-- QR Modal -->
+    <div id="qr-modal" class="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm opacity-0 pointer-events-none transition-all duration-300 ease-out">
+        <div class="w-full max-w-sm bg-white dark:bg-amoled-card border border-gray-200 dark:border-amoled-border rounded-2xl shadow-xl overflow-hidden p-6 text-center transition-all transform duration-300 opacity-0 scale-95 ease-out">
+            <h3 class="font-bold text-gray-900 dark:text-zinc-100 mb-4">اسکن کد QR کانفیگ VLESS</h3>
+            <div class="bg-white p-3 rounded-xl inline-block mb-4 border border-gray-100">
+                <div id="qrcode-box" class="flex justify-center items-center w-48 h-48 mx-auto"></div>
+            </div>
+            <button onclick="toggleQRModal(false)" class="w-full py-2 bg-gray-100 hover:bg-gray-200 dark:bg-zinc-800 dark:hover:bg-zinc-700 font-medium rounded-lg text-sm transition text-gray-900 dark:text-zinc-100">بستن</button>
+        </div>
+    </div>
+
+    <script>
+        /* {{USER_DATA_PLACEHOLDER}} */
+        
+        function toggleQRModal(show, link = '') {
+            const modal = document.getElementById('qr-modal');
+            const card = modal.querySelector('div');
+            const qrBox = document.getElementById('qrcode-box');
+            if (show) {
+                qrBox.innerHTML = '';
+                new QRCode(qrBox, {
+                    text: link,
+                    width: 192,
+                    height: 192,
+                    colorDark : "#000000",
+                    colorLight : "#ffffff",
+                    correctLevel : QRCode.CorrectLevel.M
+                });
+                modal.classList.remove('opacity-0', 'pointer-events-none');
+                modal.classList.add('opacity-100', 'pointer-events-auto');
+                card.classList.remove('opacity-0', 'scale-95');
+                card.classList.add('opacity-100', 'scale-100');
+            } else {
+                modal.classList.remove('opacity-100', 'pointer-events-auto');
+                modal.classList.add('opacity-0', 'pointer-events-none');
+                card.classList.remove('opacity-100', 'scale-100');
+                card.classList.add('opacity-0', 'scale-95');
+            }
+        }
+
+        function getHost() {
+            return window.location.host;
+        }
+
+        function getVlessLink() {
+            const u = window.statusUser;
+            const tlsVal = u.tls === 'on' ? 'tls' : 'none';
+            const remark = u.username;
+            return atob('dmxlc3M6Ly8=') + u.uuid + '@' + getHost() + ':' + u.port + '?path=%2F&security=' + tlsVal + '&encryption=none&insecure=0&host=' + getHost() + '&fp=chrome&type=ws&allowInsecure=0&sni=' + getHost() + '#' + encodeURIComponent(remark);
+        }
+
+        function copyVlessConfig() {
+            navigator.clipboard.writeText(getVlessLink()).then(() => alert('✅ کانفیگ VLESS با موفقیت کپی شد!'));
+        }
+
+        function copyJsonSub() {
+            const link = window.location.protocol + '//' + getHost() + '/feed/json/' + encodeURIComponent(window.statusUser.username);
+            navigator.clipboard.writeText(link).then(() => alert('✅ لینک ساب JSON کپی شد!'));
+        }
+
+        function copyTextSub() {
+            const link = window.location.protocol + '//' + getHost() + '/sub/' + encodeURIComponent(window.statusUser.username);
+            navigator.clipboard.writeText(link).then(() => alert('✅ لینک ساب متنی کپی شد!'));
+        }
+
+        function showQR() {
+            toggleQRModal(true, getVlessLink());
+        }
+
+        document.addEventListener('DOMContentLoaded', () => {
+            const u = window.statusUser;
+            if (!u) return;
+
+            document.getElementById('display-username').innerText = '@' + u.username;
+
+            // Compute volume
+            const usedGb = u.used_gb || 0;
+            const limitGb = u.limit_gb;
+            const formattedUsed = usedGb < 1 ? (usedGb * 1024).toFixed(0) + ' MB' : usedGb.toFixed(2) + ' GB';
+            document.getElementById('used-vol').innerText = formattedUsed;
+            
+            let isVolumeExpired = false;
+            if (limitGb) {
+                document.getElementById('limit-vol').innerText = limitGb + ' GB';
+                const pct = Math.min((usedGb / limitGb) * 100, 100);
+                document.getElementById('volume-pct').innerText = pct.toFixed(0) + '٪';
+                document.getElementById('volume-progress').style.width = pct + '%';
+                
+                // Color bar
+                const hue = 120 - (pct * 1.2);
+                document.getElementById('volume-progress').style.backgroundColor = 'hsl(' + hue + ', 80%, 45%)';
+                
+                if (usedGb >= limitGb) isVolumeExpired = true;
+            } else {
+                document.getElementById('limit-vol').innerText = 'نامحدود';
+                document.getElementById('volume-pct').innerText = '۰٪';
+                document.getElementById('volume-progress').style.width = '100%';
+                document.getElementById('volume-progress').style.backgroundColor = '#2563eb';
+            }
+
+            // Compute Expiry
+            let daysRemaining = 'نامحدود';
+            let totalDays = 'نامحدود';
+            let isTimeExpired = false;
+            
+            if (u.expiry_days) {
+                totalDays = u.expiry_days + ' روز';
+                if (u.created_at) {
+                    const created = new Date(u.created_at);
+                    const expiryDate = new Date(created.getTime() + (u.expiry_days * 24 * 60 * 60 * 1000));
+                    const diffDays = Math.ceil((expiryDate - new Date()) / (1000 * 60 * 60 * 24));
+                    daysRemaining = diffDays > 0 ? diffDays : 0;
+                    
+                    const pct = Math.max(0, Math.min(100, (daysRemaining / u.expiry_days) * 100));
+                    document.getElementById('expiry-pct').innerText = (100 - pct).toFixed(0) + '٪';
+                    document.getElementById('expiry-progress').style.width = pct + '%';
+                    
+                    const hue = pct * 1.2;
+                    document.getElementById('expiry-progress').style.backgroundColor = 'hsl(' + hue + ', 80%, 45%)';
+                    
+                    if (new Date() > expiryDate) isTimeExpired = true;
+                }
+            } else {
+                document.getElementById('expiry-pct').innerText = '۰٪';
+                document.getElementById('expiry-progress').style.width = '100%';
+                document.getElementById('expiry-progress').style.backgroundColor = '#7c3aed';
+            }
+            
+            document.getElementById('days-remaining').innerText = daysRemaining === 'نامحدود' ? 'نامحدود' : daysRemaining + ' روز';
+            document.getElementById('total-days').innerText = totalDays;
+
+            // Set Status
+            const statusCard = document.getElementById('status-card');
+            const statusText = document.getElementById('status-text');
+            
+            if (u.is_active === 0) {
+                statusCard.className = 'mb-6 rounded-2xl p-4 text-center border font-bold relative z-10 bg-red-500/10 border-red-500/30 text-red-500 shadow-md shadow-red-500/5';
+                statusCard.style.boxShadow = 'inset 0 0 12px rgba(239, 68, 68, 0.1)';
+                statusText.innerText = '❌ وضعیت اشتراک: غیرفعال / مسدود دستی';
+            } else if (isVolumeExpired) {
+                statusCard.className = 'mb-6 rounded-2xl p-4 text-center border font-bold relative z-10 bg-yellow-500/10 border-yellow-500/30 text-yellow-500 shadow-md shadow-yellow-500/5';
+                statusText.innerText = '⚠️ وضعیت اشتراک: تمام شدن حجم مجاز';
+            } else if (isTimeExpired) {
+                statusCard.className = 'mb-6 rounded-2xl p-4 text-center border font-bold relative z-10 bg-yellow-500/10 border-yellow-500/30 text-yellow-500 shadow-md shadow-yellow-500/5';
+                statusText.innerText = '⏳ وضعیت اشتراک: منقضی شده (پایان زمان اعتبار)';
+            } else {
+                statusCard.className = 'mb-6 rounded-2xl p-4 text-center border font-bold relative z-10 bg-emerald-500/10 border-emerald-500/30 text-emerald-500 shadow-md shadow-emerald-500/5';
+                statusText.innerText = '✅ وضعیت اشتراک: فعال و متصل';
+            }
         });
     </script>
 </body>
