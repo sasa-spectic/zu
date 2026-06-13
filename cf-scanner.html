@@ -1,0 +1,1151 @@
+<!DOCTYPE html>
+<html lang="fa" dir="rtl">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>اسکنر هوشمند کلودفلر | Zeus-Panel</title>
+  
+  <!-- Google Fonts for Persian (Vazirmatn) and English (Outfit) -->
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;600;700&family=Vazirmatn:wght@300;400;700&display=swap" rel="stylesheet">
+  
+  <!-- QR Code Library -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
+
+  <style>
+    /* Styling Custom variables & Dark AMOLED system */
+    :root {
+      --bg-color: #060813;
+      --card-bg: rgba(13, 18, 36, 0.7);
+      --card-border: rgba(255, 255, 255, 0.08);
+      --accent-cyan: #00f2fe;
+      --accent-purple: #9b51e0;
+      --accent-blue: #2f80ed;
+      --text-main: #f8fafc;
+      --text-muted: #94a3b8;
+      --success: #10b981;
+      --danger: #ef4444;
+      --warning: #f59e0b;
+      --font-family: 'Vazirmatn', 'Outfit', sans-serif;
+    }
+
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+      font-family: var(--font-family);
+    }
+
+    body {
+      background-color: var(--bg-color);
+      color: var(--text-main);
+      min-height: 100vh;
+      overflow-x: hidden;
+      position: relative;
+      padding: 2rem 1rem;
+      background-image: 
+        radial-gradient(circle at 10% 20%, rgba(0, 242, 254, 0.05) 0%, transparent 40%),
+        radial-gradient(circle at 90% 80%, rgba(155, 81, 224, 0.05) 0%, transparent 40%);
+    }
+
+    /* Decorative background glowing orbs */
+    .orb {
+      position: absolute;
+      width: 300px;
+      height: 300px;
+      border-radius: 50%;
+      filter: blur(120px);
+      z-index: -1;
+      pointer-events: none;
+      opacity: 0.5;
+    }
+    .orb-1 {
+      top: -50px;
+      left: -50px;
+      background: var(--accent-cyan);
+    }
+    .orb-2 {
+      bottom: -50px;
+      right: -50px;
+      background: var(--accent-purple);
+    }
+
+    .container {
+      max-width: 1000px;
+      margin: 0 auto;
+      display: flex;
+      flex-direction: column;
+      gap: 1.5rem;
+    }
+
+    /* Header component with glowing animation */
+    header {
+      text-align: center;
+      padding: 1.5rem;
+      background: var(--card-bg);
+      border: 1px solid var(--card-border);
+      border-radius: 24px;
+      backdrop-filter: blur(16px);
+      -webkit-backdrop-filter: blur(16px);
+      box-shadow: 0 8px 32px 0 rgba(0, 0, 0, 0.3);
+      position: relative;
+    }
+
+    header::after {
+      content: '';
+      position: absolute;
+      bottom: 0;
+      left: 10%;
+      width: 80%;
+      height: 1px;
+      background: linear-gradient(90deg, transparent, var(--accent-cyan), var(--accent-purple), transparent);
+    }
+
+    .logo-container {
+      display: inline-flex;
+      padding: 1rem;
+      background: rgba(0, 242, 254, 0.08);
+      border-radius: 20px;
+      color: var(--accent-cyan);
+      margin-bottom: 0.75rem;
+      border: 1px solid rgba(0, 242, 254, 0.2);
+      box-shadow: 0 0 15px rgba(0, 242, 254, 0.1);
+      animation: pulse 2s infinite alternate;
+    }
+
+    @keyframes pulse {
+      0% { transform: scale(1); box-shadow: 0 0 10px rgba(0, 242, 254, 0.1); }
+      100% { transform: scale(1.05); box-shadow: 0 0 20px rgba(0, 242, 254, 0.3); }
+    }
+
+    h1 {
+      font-size: 1.75rem;
+      font-weight: 700;
+      background: linear-gradient(135deg, #fff 30%, var(--text-muted) 100%);
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+      margin-bottom: 0.25rem;
+    }
+
+    header p {
+      color: var(--text-muted);
+      font-size: 0.9rem;
+    }
+
+    /* Dashboard Layout Grid */
+    .grid {
+      display: grid;
+      grid-template-columns: 1fr 1.5fr;
+      gap: 1.5rem;
+    }
+
+    @media (max-width: 850px) {
+      .grid {
+        grid-template-columns: 1fr;
+      }
+    }
+
+    /* Cards Glassmorphic styling */
+    .card {
+      background: var(--card-bg);
+      border: 1px solid var(--card-border);
+      border-radius: 24px;
+      backdrop-filter: blur(16px);
+      -webkit-backdrop-filter: blur(16px);
+      padding: 1.5rem;
+      box-shadow: 0 8px 32px 0 rgba(0, 0, 0, 0.3);
+      display: flex;
+      flex-direction: column;
+      gap: 1.25rem;
+      transition: border-color 0.3s ease;
+    }
+
+    .card:hover {
+      border-color: rgba(255, 255, 255, 0.15);
+    }
+
+    .card-title {
+      font-size: 1.1rem;
+      font-weight: 700;
+      color: var(--text-main);
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+      border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+      padding-bottom: 0.75rem;
+    }
+
+    .card-title svg {
+      width: 20px;
+      height: 20px;
+      color: var(--accent-cyan);
+    }
+
+    /* Input & Form Elements styling */
+    .form-group {
+      display: flex;
+      flex-direction: column;
+      gap: 0.5rem;
+    }
+
+    label {
+      font-size: 0.85rem;
+      font-weight: 600;
+      color: var(--text-muted);
+    }
+
+    select, input[type="number"], textarea, input[type="text"] {
+      width: 100%;
+      background: rgba(10, 15, 30, 0.8);
+      border: 1px solid var(--card-border);
+      border-radius: 12px;
+      padding: 0.75rem 1rem;
+      color: var(--text-main);
+      font-size: 0.9rem;
+      transition: all 0.3s ease;
+      outline: none;
+    }
+
+    select:focus, input[type="number"]:focus, textarea:focus, input[type="text"]:focus {
+      border-color: var(--accent-cyan);
+      box-shadow: 0 0 10px rgba(0, 242, 254, 0.15);
+    }
+
+    /* Custom range slider stylings */
+    .slider-container {
+      display: flex;
+      align-items: center;
+      gap: 1rem;
+    }
+
+    .slider-val {
+      font-family: 'Outfit', sans-serif;
+      font-size: 0.95rem;
+      font-weight: 600;
+      color: var(--accent-cyan);
+      min-width: 60px;
+      text-align: left;
+    }
+
+    input[type="range"] {
+      flex-grow: 1;
+      accent-color: var(--accent-cyan);
+      background: rgba(255, 255, 255, 0.1);
+      height: 6px;
+      border-radius: 3px;
+      outline: none;
+    }
+
+    /* Styled buttons with gradients and micro-interactions */
+    .btn {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 0.5rem;
+      border: none;
+      border-radius: 14px;
+      padding: 0.9rem 1.5rem;
+      font-size: 0.95rem;
+      font-weight: 700;
+      cursor: pointer;
+      transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+      position: relative;
+      overflow: hidden;
+    }
+
+    .btn-primary {
+      background: linear-gradient(135deg, var(--accent-cyan) 0%, var(--accent-blue) 100%);
+      color: #060813;
+      box-shadow: 0 4px 15px rgba(0, 242, 254, 0.3);
+    }
+
+    .btn-primary:hover:not(:disabled) {
+      transform: translateY(-2px);
+      box-shadow: 0 6px 20px rgba(0, 242, 254, 0.5);
+    }
+
+    .btn-danger {
+      background: linear-gradient(135deg, var(--danger) 0%, #b91c1c 100%);
+      color: white;
+      box-shadow: 0 4px 15px rgba(239, 68, 68, 0.3);
+    }
+
+    .btn-danger:hover {
+      transform: translateY(-2px);
+      box-shadow: 0 6px 20px rgba(239, 68, 68, 0.5);
+    }
+
+    .btn:active {
+      transform: translateY(0);
+    }
+
+    .btn:disabled {
+      opacity: 0.5;
+      cursor: not-allowed;
+      transform: none !important;
+      box-shadow: none !important;
+    }
+
+    .btn-sm {
+      padding: 0.4rem 0.8rem;
+      font-size: 0.8rem;
+      border-radius: 8px;
+    }
+
+    .btn-outline {
+      background: transparent;
+      border: 1px solid rgba(255, 255, 255, 0.15);
+      color: var(--text-main);
+    }
+
+    .btn-outline:hover {
+      background: rgba(255, 255, 255, 0.05);
+      border-color: rgba(255, 255, 255, 0.3);
+    }
+
+    /* Scanning progress panels */
+    .progress-box {
+      border: 1px dashed rgba(255, 255, 255, 0.1);
+      background: rgba(255, 255, 255, 0.02);
+      border-radius: 16px;
+      padding: 1rem;
+      display: flex;
+      flex-direction: column;
+      gap: 0.75rem;
+    }
+
+    .progress-bar-bg {
+      width: 100%;
+      height: 8px;
+      background: rgba(255, 255, 255, 0.05);
+      border-radius: 4px;
+      overflow: hidden;
+    }
+
+    .progress-bar-fill {
+      height: 100%;
+      width: 0%;
+      background: linear-gradient(90deg, var(--accent-cyan), var(--accent-purple));
+      border-radius: 4px;
+      transition: width 0.3s ease;
+    }
+
+    .progress-info {
+      display: flex;
+      justify-content: space-between;
+      font-size: 0.8rem;
+      color: var(--text-muted);
+    }
+
+    .current-testing-ip {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 0.5rem;
+      font-family: 'Outfit', sans-serif;
+      font-size: 1rem;
+      font-weight: 600;
+      color: var(--accent-cyan);
+      padding: 0.5rem;
+      background: rgba(0, 242, 254, 0.05);
+      border-radius: 8px;
+      border: 1px solid rgba(0, 242, 254, 0.1);
+    }
+
+    /* Results Table Styles */
+    .table-container {
+      overflow-x: auto;
+      max-height: 400px;
+      border: 1px solid rgba(255, 255, 255, 0.05);
+      border-radius: 14px;
+      background: rgba(10, 15, 30, 0.4);
+    }
+
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      text-align: right;
+    }
+
+    th, td {
+      padding: 0.75rem 1rem;
+      font-size: 0.85rem;
+    }
+
+    th {
+      background: rgba(255, 255, 255, 0.03);
+      color: var(--text-muted);
+      font-weight: 700;
+      border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+      position: sticky;
+      top: 0;
+      z-index: 10;
+      backdrop-filter: blur(8px);
+    }
+
+    td {
+      border-bottom: 1px solid rgba(255, 255, 255, 0.03);
+    }
+
+    tr:last-child td {
+      border-bottom: none;
+    }
+
+    tr:hover td {
+      background: rgba(255, 255, 255, 0.02);
+    }
+
+    .ip-col {
+      font-family: 'Outfit', sans-serif;
+      font-weight: 600;
+      color: var(--text-main);
+    }
+
+    .latency-col {
+      font-family: 'Outfit', sans-serif;
+      font-weight: 700;
+    }
+
+    .latency-fast { color: var(--success); }
+    .latency-medium { color: var(--warning); }
+    .latency-slow { color: var(--danger); }
+
+    .rating-badge {
+      display: inline-flex;
+      padding: 0.2rem 0.5rem;
+      border-radius: 6px;
+      font-size: 0.75rem;
+      font-weight: 700;
+    }
+    .rating-excellent { background: rgba(16, 185, 129, 0.1); color: var(--success); border: 1px solid rgba(16, 185, 129, 0.2); }
+    .rating-good { background: rgba(59, 130, 246, 0.1); color: var(--accent-blue); border: 1px solid rgba(59, 130, 246, 0.2); }
+    .rating-fair { background: rgba(245, 158, 11, 0.1); color: var(--warning); border: 1px solid rgba(245, 158, 11, 0.2); }
+
+    /* Actions bar for results */
+    .actions-bar {
+      display: flex;
+      justify-content: flex-end;
+      gap: 0.75rem;
+      margin-top: 0.5rem;
+    }
+
+    /* Sub/Config Modifier tool card */
+    .config-box {
+      background: rgba(255, 255, 255, 0.02);
+      border: 1px solid rgba(255, 255, 255, 0.05);
+      border-radius: 16px;
+      padding: 1.25rem;
+    }
+
+    .config-textarea {
+      font-family: 'Outfit', sans-serif;
+      font-size: 0.8rem;
+      height: 100px;
+      resize: vertical;
+      background: rgba(10, 10, 20, 0.9);
+    }
+
+    /* Modal for QR Code */
+    .modal {
+      position: fixed;
+      inset: 0;
+      background: rgba(6, 8, 19, 0.8);
+      backdrop-filter: blur(8px);
+      -webkit-backdrop-filter: blur(8px);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      opacity: 0;
+      pointer-events: none;
+      transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+      z-index: 1000;
+      padding: 1rem;
+    }
+
+    .modal.open {
+      opacity: 1;
+      pointer-events: auto;
+    }
+
+    .modal-content {
+      background: #0d1224;
+      border: 1px solid var(--card-border);
+      border-radius: 24px;
+      padding: 1.75rem;
+      max-width: 400px;
+      width: 100%;
+      box-shadow: 0 20px 50px rgba(0, 0, 0, 0.5);
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 1.25rem;
+      transform: scale(0.9);
+      transition: transform 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+    }
+
+    .modal.open .modal-content {
+      transform: scale(1);
+    }
+
+    .modal-title {
+      font-size: 1.1rem;
+      font-weight: 700;
+      width: 100%;
+      text-align: center;
+      border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+      padding-bottom: 0.5rem;
+    }
+
+    .qr-container {
+      background: white;
+      padding: 0.75rem;
+      border-radius: 16px;
+      box-shadow: 0 8px 20px rgba(0, 0, 0, 0.2);
+    }
+
+    .loader {
+      width: 16px;
+      height: 16px;
+      border: 2px solid transparent;
+      border-top-color: currentColor;
+      border-radius: 50%;
+      animation: spin 0.6s linear infinite;
+      display: inline-block;
+    }
+
+    @keyframes spin {
+      to { transform: rotate(360deg); }
+    }
+  </style>
+</head>
+<body>
+  <!-- Background Orbs -->
+  <div class="orb orb-1"></div>
+  <div class="orb orb-2"></div>
+
+  <div class="container">
+    <!-- Header -->
+    <header>
+      <div class="logo-container">
+        <svg class="w-8 h-8" fill="none" stroke="currentColor" viewBox="0 0 24 24" style="width:32px; height:32px;">
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M13 10V3L4 14h7v7l9-11h-7z"></path>
+        </svg>
+      </div>
+      <h1>اسکنر هوشمند کلودفلر زئوس پنل (Zeus-Panel)</h1>
+      <p>تست زنده پینگ و پایداری آی‌پی‌های ابری | توسعه‌یافته برای پروژه Zeus-Panel</p>
+    </header>
+
+    <!-- Content Grid -->
+    <div class="grid">
+      
+      <!-- Left Panel: Controls & Settings -->
+      <div class="card">
+        <div class="card-title">
+          <svg fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 6V4m0 2a2 2 0 100 4m0-4a2 2 0 110 4m-6 8a2 2 0 100-4m0 4a2 2 0 110-4m0 4v2m0-6V4m6 6v10m6-2a2 2 0 100-4m0 4a2 2 0 110-4m0 4v2m0-6V4"></path></svg>
+          تنظیمات اسکنر
+        </div>
+
+        <div class="form-group">
+          <label>پروتکل و پورت تست:</label>
+          <select id="protocol-select">
+            <option value="https:443" selected>HTTPS (پورت 443 - پیش‌فرض ایمن)</option>
+            <option value="https:8443">HTTPS (پورت 8443)</option>
+            <option value="https:2053">HTTPS (پورت 2053)</option>
+            <option value="https:2083">HTTPS (پورت 2083)</option>
+            <option value="https:2087">HTTPS (پورت 2087)</option>
+            <option value="https:2096">HTTPS (پورت 2096)</option>
+            <option value="http:80">HTTP (پورت 80 - برای تست سریعتر بدون TLS)</option>
+            <option value="http:8080">HTTP (پورت 8080)</option>
+            <option value="http:8880">HTTP (پورت 8880)</option>
+          </select>
+        </div>
+
+        <div class="form-group">
+          <label>حداکثر تاخیر مجاز (پینگ):</label>
+          <div class="slider-container">
+            <input type="range" id="latency-slider" min="100" max="1500" step="50" value="500">
+            <span class="slider-val" id="latency-val">500ms</span>
+          </div>
+        </div>
+
+        <div class="form-group">
+          <label>همزمانی اسکن (Concurrency):</label>
+          <div class="slider-container">
+            <input type="range" id="concurrency-slider" min="10" max="200" step="10" value="100">
+            <span class="slider-val" id="concurrency-val">100 اتصال</span>
+          </div>
+          <div id="concurrency-warning" style="display:none; font-size:0.75rem; color:var(--warning); margin-top:0.25rem; line-height:1.4;">
+            ⚠️ همزمانی بالای ۱۵۰ اتصال همزمان، به علت محدودیت‌های سوکت مرورگر ممکن است باعث تأخیر کاذب و کاهش دقت پینگ شود.
+          </div>
+        </div>
+
+        <div class="form-group">
+          <label>تعداد آی‌پی درخواستی:</label>
+          <div class="slider-container">
+            <input type="range" id="limit-slider" min="5" max="100" step="5" value="15">
+            <span class="slider-val" id="limit-val">15 آی‌پی</span>
+          </div>
+        </div>
+
+        <div class="form-group">
+          <button id="btn-start" class="btn btn-primary" onclick="startScan()">
+            <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24" style="width:20px;"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M14.752 11.168l-3.197-2.132A1 1 0 0010 9.87v4.263a1 1 0 001.555.832l3.197-2.132a1 1 0 000-1.664z"></path><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 12a9 9 0 11-18 0 9 9 0 0118 0z"></path></svg>
+            شروع اسکن آی‌پی‌ها
+          </button>
+          <button id="btn-stop" class="btn btn-danger" onclick="stopScan()" style="display:none;">
+            <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24" style="width:20px;"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M18.364 18.364A9 9 0 005.636 5.636m12.728 12.728A9 9 0 015.636 5.636m12.728 12.728L5.636 5.636"></path></svg>
+            توقف عملیات
+          </button>
+        </div>
+
+        <!-- Scanning progress details -->
+        <div id="progress-panel" class="progress-box" style="display:none;">
+          <div class="progress-info">
+            <span id="progress-status">در حال آماده‌سازی محدوده آی‌پی‌ها...</span>
+            <span id="progress-pct">0%</span>
+          </div>
+          <div class="progress-bar-bg">
+            <div id="progress-bar" class="progress-bar-fill"></div>
+          </div>
+          <div id="current-ip" class="current-testing-ip">-</div>
+          <div class="progress-info" style="font-size:0.75rem;">
+            <span>آی‌پی‌های تست شده: <span id="tested-count" class="ip-col">0</span></span>
+            <span>یافت شده: <span id="found-count" class="ip-col" style="color:var(--success)">0</span></span>
+          </div>
+          
+          <!-- Smart subnet clustering feedback display -->
+          <div id="smart-subnets-container" style="display:none; font-size:0.75rem; border-top:1px dashed rgba(255,255,255,0.08); padding-top:0.5rem; flex-direction:column; gap:0.25rem;">
+            <div style="color:var(--text-muted); font-weight:700; display:flex; align-items:center; gap:0.25rem;">
+              <span class="loader" style="width:10px; height:10px;"></span>
+              زیرشبکه‌های فعال شناسایی‌شده:
+            </div>
+            <div id="smart-subnets-list" style="display:flex; flex-wrap:wrap; gap:0.25rem; font-family:'Outfit',sans-serif; color:var(--accent-cyan); font-weight:600;">
+              -
+            </div>
+          </div>
+        </div>
+
+      </div>
+
+      <!-- Right Panel: Results & Integrator -->
+      <div class="card" style="gap:1rem;">
+        <div class="card-title">
+          <svg fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"></path></svg>
+          آی‌پی‌های تمیز یافت شده
+        </div>
+
+        <!-- Table Container -->
+        <div class="table-container">
+          <table id="results-table">
+            <thead>
+              <tr>
+                <th style="width:10%">ردیف</th>
+                <th style="width:40%">آدرس آی‌پی</th>
+                <th style="width:25%">میزان تاخیر</th>
+                <th style="width:25%">عملیات</th>
+              </tr>
+            </thead>
+            <tbody id="results-body">
+              <tr>
+                <td colspan="4" style="text-align:center; color:var(--text-muted); padding:2rem;">
+                  هنوز اسکن انجام نشده است. روی "شروع اسکن" کلیک کنید.
+                </td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+
+        <div class="actions-bar" id="table-actions" style="display:none;">
+          <button class="btn btn-outline btn-sm" onclick="downloadJSON()">دانلود خروجی JSON</button>
+          <button class="btn btn-primary btn-sm" onclick="copyAllIPs()">کپی کردن همه آی‌پی‌ها</button>
+        </div>
+
+        <!-- Config Integration Section -->
+        <div class="config-box flex flex-col gap-3" style="display: flex; flex-direction: column; gap: 0.75rem;">
+          <div style="font-size:0.9rem; font-weight:700; color:var(--text-main); display:flex; align-items:center; gap:0.5rem;">
+            <svg fill="none" stroke="currentColor" viewBox="0 0 24 24" style="width:16px; color:var(--accent-purple);"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19.428 15.428a2 2 0 00-1.022-.547l-2.387-.477a6 6 0 00-3.86.517l-.318.158a6 6 0 01-3.86.517L6.05 15.21a2 2 0 00-1.806.547M8 4h8l-1 1v5.172a2 2 0 00.586 1.414l5 5c1.26 1.26.367 3.414-1.415 3.414H4.828c-1.782 0-2.674-2.154-1.414-3.414l5-5A2 2 0 009 10.172V5L8 4z"></path></svg>
+            تزریق هوشمند آی‌پی به کانفیگ VLESS
+          </div>
+          <p style="font-size:0.75rem; color:var(--text-muted); line-height:1.4;">
+            کانفیگ VLESS خود را در کادر زیر وارد کنید. سپس پس از پیدا شدن آی‌پی‌ها، با کلیک روی نماد اعمال در جدول یا دکمه زیر، کانفیگ با آی‌پی جدید بروزرسانی خواهد شد.
+          </p>
+          <textarea id="config-input" class="config-textarea" placeholder="vless://e123..."></textarea>
+          <div style="display:flex; justify-content:space-between; align-items:center; gap:0.5rem;">
+            <button id="btn-update-config" class="btn btn-outline btn-sm" onclick="updateConfigWithBestIP()" disabled>
+              اعمال بهترین آی‌پی روی کانفیگ
+            </button>
+            <div id="quick-links" style="display:none; gap:0.5rem;">
+              <button class="btn btn-primary btn-sm" onclick="copyUpdatedConfig()">کپی کانفیگ</button>
+              <button class="btn btn-outline btn-sm" onclick="showQRModal()">نمایش QR</button>
+            </div>
+          </div>
+        </div>
+
+      </div>
+    </div>
+    
+    <!-- Footer -->
+    <footer style="text-align:center; padding:1.5rem; margin-top:1.5rem; font-size:0.8rem; color:var(--text-muted); border-top:1px dashed rgba(255, 255, 255, 0.05);">
+      <p>طراحی شده به عنوان بخشی از پروژه <span style="color:var(--accent-cyan); font-weight:700;">Zeus-Panel</span></p>
+    </footer>
+  </div>
+
+  <!-- QR Code Modal -->
+  <div class="modal" id="qr-modal">
+    <div class="modal-content">
+      <div class="modal-title">QR Code کانفیگ بروزرسانی شده</div>
+      <div class="qr-container">
+        <div id="qrcode"></div>
+      </div>
+      <button class="btn btn-outline btn-sm" style="width:100%" onclick="closeQRModal()">بستن</button>
+    </div>
+  </div>
+
+  <script>
+    // Live UI Sliders reactive binding
+    const latencySlider = document.getElementById('latency-slider');
+    const latencyVal = document.getElementById('latency-val');
+    latencySlider.oninput = function() { latencyVal.innerText = this.value + 'ms'; }
+
+    const concurrencySlider = document.getElementById('concurrency-slider');
+    const concurrencyVal = document.getElementById('concurrency-val');
+    concurrencySlider.oninput = function() { 
+      concurrencyVal.innerText = this.value + ' اتصال';
+      const warningDiv = document.getElementById('concurrency-warning');
+      if (parseInt(this.value, 10) > 150) {
+        warningDiv.style.display = 'block';
+      } else {
+        warningDiv.style.display = 'none';
+      }
+    }
+
+    const limitSlider = document.getElementById('limit-slider');
+    const limitVal = document.getElementById('limit-val');
+    limitSlider.oninput = function() { limitVal.innerText = this.value + ' آی‌پی'; }
+
+    // Cloudflare IPv4 Address Ranges (Official)
+    const cloudflareCidrs = [
+      "173.245.48.0/20",
+      "103.21.244.0/22",
+      "103.22.200.0/22",
+      "103.31.4.0/22",
+      "141.101.64.0/18",
+      "108.162.192.0/18",
+      "190.93.240.0/20",
+      "188.114.96.0/20",
+      "197.234.240.0/22",
+      "198.41.128.0/17",
+      "162.158.0.0/15",
+      "104.16.0.0/13",
+      "104.24.0.0/14",
+      "172.64.0.0/13",
+      "131.0.72.0/22"
+    ];
+
+    // Global scanning states
+    let activeScan = false;
+    let scanStopRequested = false;
+    let foundIPs = [];
+    let successfulSubnets = []; // Dynamically learned successful /24 subnets
+    let updatedConfigStr = "";
+
+    // IP Helpers: Conversions
+    function ipToInt(ip) {
+      return ip.split('.').reduce((res, octet) => (res << 8) + parseInt(octet, 10), 0) >>> 0;
+    }
+
+    function intToIp(int) {
+      return [
+        (int >>> 24) & 0xFF,
+        (int >>> 16) & 0xFF,
+        (int >>> 8) & 0xFF,
+        int & 0xFF
+      ].join('.');
+    }
+
+    // Dynamic IP generator with smart sampling from CIDR ranges
+    function sampleIpsFromCidr(cidr, count = 2) {
+      const [baseIp, maskStr] = cidr.split('/');
+      const mask = parseInt(maskStr, 10);
+      const base = ipToInt(baseIp);
+      const totalIps = Math.pow(2, 32 - mask);
+      const ips = [];
+
+      if (mask < 24) {
+        // Sample from randomized /24 blocks to ensure routing diversity
+        const totalSubnets = Math.pow(2, 24 - mask);
+        const subnetsToSample = Math.min(totalSubnets, count * 3); // Over-sample slightly
+        const sampledSubnets = new Set();
+        while (sampledSubnets.size < subnetsToSample) {
+          sampledSubnets.add(Math.floor(Math.random() * totalSubnets));
+        }
+
+        for (const subnetOffset of sampledSubnets) {
+          const subnetBase = base + (subnetOffset * 256);
+          const host = Math.floor(Math.random() * 253) + 1; // Pick host between 1 and 253
+          ips.push(intToIp(subnetBase + host));
+        }
+      } else {
+        // Small subnet, sample hosts directly
+        const hostsToSample = Math.min(totalIps - 2, count);
+        const sampledHosts = new Set();
+        while (sampledHosts.size < hostsToSample) {
+          sampledHosts.add(Math.floor(Math.random() * (totalIps - 2)) + 1);
+        }
+        for (const hostOffset of sampledHosts) {
+          ips.push(intToIp(base + hostOffset));
+        }
+      }
+
+      // Shuffle the results and slice to the target count
+      return ips.sort(() => 0.5 - Math.random()).slice(0, count);
+    }
+
+    // Generate a single random Cloudflare IP dynamically
+    function getRandomIpFromCidr(cidr) {
+      const [baseIp, maskStr] = cidr.split('/');
+      const mask = parseInt(maskStr, 10);
+      const base = ipToInt(baseIp);
+      const totalIps = Math.pow(2, 32 - mask);
+      const offset = Math.floor(Math.random() * (totalIps - 2)) + 1;
+      return intToIp(base + offset);
+    }
+
+    function getSubnet24(ip) {
+      const parts = ip.split('.');
+      if (parts.length === 4) {
+        return parts.slice(0, 3).join('.');
+      }
+      return null;
+    }
+
+    function generateRandomCloudflareIp() {
+      // 80% chance to pick from dynamically learned successful /24 subnets
+      if (successfulSubnets.length > 0 && Math.random() < 0.80) {
+        const randomSubnet = successfulSubnets[Math.floor(Math.random() * successfulSubnets.length)];
+        const host = Math.floor(Math.random() * 253) + 1; // Pick host between 1 and 253
+        return `${randomSubnet}.${host}`;
+      }
+      
+      const cidr = cloudflareCidrs[Math.floor(Math.random() * cloudflareCidrs.length)];
+      return getRandomIpFromCidr(cidr);
+    }
+
+    // Core scanner runner (Continuous scan loop)
+    async function startScan() {
+      if (activeScan) return;
+      activeScan = true;
+      scanStopRequested = false;
+      foundIPs = [];
+      successfulSubnets = []; // Reset learned subnets
+      const testedIps = new Set();
+
+      // UI Transitions
+      document.getElementById('btn-start').style.display = 'none';
+      document.getElementById('btn-stop').style.display = 'inline-flex';
+      document.getElementById('progress-panel').style.display = 'flex';
+      document.getElementById('table-actions').style.display = 'none';
+      document.getElementById('smart-subnets-container').style.display = 'none';
+      document.getElementById('smart-subnets-list').innerHTML = '-';
+      
+      const tbody = document.getElementById('results-body');
+      tbody.innerHTML = `
+        <tr>
+          <td colspan="4" style="text-align:center; color:var(--text-muted); padding:2rem;">
+            در حال شروع اسکن مداوم رنج‌های کلودفلر...
+          </td>
+        </tr>`;
+
+      // Read scanner values
+      const protocolVal = document.getElementById('protocol-select').value;
+      const [protocol, port] = protocolVal.split(':');
+      const maxLatency = parseInt(latencySlider.value, 10);
+      const concurrency = parseInt(concurrencySlider.value, 10);
+      const limit = parseInt(limitSlider.value, 10);
+      
+      let testedCount = 0;
+      let activeConnections = 0;
+
+      document.getElementById('progress-status').innerText = 'در حال اسکن زنده و مداوم...';
+
+      // Perform concurrent queue scan
+      return new Promise((resolve) => {
+        const checkQueue = async () => {
+          if (scanStopRequested || foundIPs.length >= limit) {
+            finishScan();
+            resolve();
+            return;
+          }
+
+          while (activeConnections < concurrency && foundIPs.length < limit && !scanStopRequested) {
+            // Generate unique random Cloudflare IP
+            let currentIp = generateRandomCloudflareIp();
+            let attempts = 0;
+            while (testedIps.has(currentIp) && attempts < 100) {
+              currentIp = generateRandomCloudflareIp();
+              attempts++;
+            }
+            testedIps.add(currentIp);
+
+            activeConnections++;
+            
+            // Execute the ping test asynchronously
+            testIpPing(currentIp, protocol, port, maxLatency).then((result) => {
+              activeConnections--;
+              testedCount++;
+              
+              // Update progress bar (found / limit)
+              const progressPct = Math.round((foundIPs.length / limit) * 100);
+              document.getElementById('progress-pct').innerText = progressPct + '%';
+              document.getElementById('progress-bar').style.width = progressPct + '%';
+              document.getElementById('tested-count').innerText = testedCount;
+              document.getElementById('current-ip').innerText = currentIp;
+
+              if (result.alive && result.latency <= maxLatency) {
+                foundIPs.push(result);
+                
+                // Dynamic learning: Extract and save successful /24 prefix
+                const subnet = getSubnet24(result.ip);
+                if (subnet && !successfulSubnets.includes(subnet)) {
+                  successfulSubnets.push(subnet);
+                  // Update UI to display smart subnets
+                  document.getElementById('smart-subnets-container').style.display = 'flex';
+                  const listContainer = document.getElementById('smart-subnets-list');
+                  listContainer.innerHTML = successfulSubnets.map(s => `<span style="background:rgba(0,242,254,0.08); border:1px solid rgba(0,242,254,0.2); padding:0.15rem 0.4rem; border-radius:6px; margin:0.1rem 0.2rem; font-size:0.75rem; display:inline-block;">${s}.x</span>`).join('');
+                }
+
+                // Sort by latency ascending
+                foundIPs.sort((a, b) => a.latency - b.latency);
+                document.getElementById('found-count').innerText = foundIPs.length;
+                renderResultsTable();
+                
+                // Enable config generator updates if there are configs pasted
+                if (foundIPs.length > 0) {
+                  document.getElementById('btn-update-config').disabled = false;
+                }
+              }
+              
+              checkQueue();
+            });
+          }
+        };
+
+        checkQueue();
+      });
+    }
+
+    // Ping mechanism using fetch time measurement
+    async function testIpPing(ip, protocol, port, maxLatency) {
+      const url = `${protocol}://${ip}:${port}/cdn-cgi/trace`;
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), maxLatency + 100);
+      
+      const start = performance.now();
+      try {
+        // Mode 'no-cors' allows browser to request without origin restrictions.
+        // It returns an opaque response, which resolves the promise if the server responded.
+        await fetch(url, {
+          signal: controller.signal,
+          mode: 'no-cors',
+          cache: 'no-cache'
+        });
+        clearTimeout(timeoutId);
+        const duration = Math.round(performance.now() - start);
+        return { ip, alive: true, latency: duration };
+      } catch (error) {
+        clearTimeout(timeoutId);
+        const duration = Math.round(performance.now() - start);
+        
+        // Key Hack: A TypeError in no-cors fetch to a direct Cloudflare IP is almost always due to 
+        // SSL certificate name mismatch (ERR_CERT_COMMON_NAME_INVALID) or CORS.
+        // But this error triggers ONLY after the TCP/TLS connection is fully established!
+        // So, if the TypeError occurred fast, the IP is alive and reachable!
+        if (error.name === 'TypeError' && duration < maxLatency + 100) {
+          return { ip, alive: true, latency: duration };
+        }
+        
+        return { ip, alive: false, latency: duration };
+      }
+    }
+
+    // Stop execution
+    function stopScan() {
+      scanStopRequested = true;
+      document.getElementById('progress-status').innerText = 'در حال توقف اسکن...';
+    }
+
+    // Terminate scanning routine
+    function finishScan() {
+      activeScan = false;
+      document.getElementById('btn-start').style.display = 'inline-flex';
+      document.getElementById('btn-stop').style.display = 'none';
+      document.getElementById('progress-panel').style.display = 'none';
+      
+      if (foundIPs.length > 0) {
+        document.getElementById('table-actions').style.display = 'flex';
+      } else {
+        const tbody = document.getElementById('results-body');
+        tbody.innerHTML = `
+          <tr>
+            <td colspan="4" style="text-align:center; color:var(--danger); padding:2rem; font-weight:700;">
+              هیچ آی‌پی تمیزی با تاخیر مورد نظر پیدا نشد. لطفاً حداکثر تاخیر مجاز را افزایش دهید یا دوباره تلاش کنید.
+            </td>
+          </tr>`;
+      }
+    }
+
+    // Render results in tables
+    function renderResultsTable() {
+      const tbody = document.getElementById('results-body');
+      tbody.innerHTML = '';
+      
+      foundIPs.forEach((item, index) => {
+        const tr = document.createElement('tr');
+        
+        // Rating calculation
+        let ratingClass = 'rating-fair';
+        let ratingText = 'معمولی';
+        if (item.latency < 250) {
+          ratingClass = 'rating-excellent';
+          ratingText = 'عالی';
+        } else if (item.latency < 450) {
+          ratingClass = 'rating-good';
+          ratingText = 'خوب';
+        }
+
+        // Latency color
+        let latClass = 'latency-slow';
+        if (item.latency < 250) latClass = 'latency-fast';
+        else if (item.latency < 450) latClass = 'latency-medium';
+
+        tr.innerHTML = `
+          <td style="color:var(--text-muted); font-weight:700;">${index + 1}</td>
+          <td class="ip-col">${item.ip}</td>
+          <td class="latency-col ${latClass}">${item.latency}ms <span class="rating-badge ${ratingClass}" style="margin-right:0.5rem; font-weight:normal;">${ratingText}</span></td>
+          <td>
+            <div style="display:flex; gap:0.4rem;">
+              <button class="btn btn-outline btn-sm" onclick="copyText('${item.ip}')" style="padding:0.25rem 0.5rem;">کپی</button>
+              <button class="btn btn-primary btn-sm" onclick="applyIPToConfig('${item.ip}')" style="padding:0.25rem 0.5rem; font-size:0.75rem;">اعمال روی کانفیگ</button>
+            </div>
+          </td>
+        `;
+        tbody.appendChild(tr);
+      });
+    }
+
+    // Copy to clipboard helper
+    function copyText(text) {
+      navigator.clipboard.writeText(text).then(() => {
+        alert('آدرس آی‌پی با موفقیت کپی شد!');
+      }).catch(() => {
+        alert('خطا در کپی کردن!');
+      });
+    }
+
+    function copyAllIPs() {
+      if (foundIPs.length === 0) return;
+      const list = foundIPs.map(i => i.ip).join('\n');
+      navigator.clipboard.writeText(list).then(() => {
+        alert('تمام آی‌پی‌های تمیز کپی شدند!');
+      });
+    }
+
+    function downloadJSON() {
+      if (foundIPs.length === 0) return;
+      const dataStr = "data:text/json;charset=utf-8," + encodeURIComponent(JSON.stringify(foundIPs, null, 2));
+      const downloadAnchor = document.createElement('a');
+      downloadAnchor.setAttribute("href", dataStr);
+      downloadAnchor.setAttribute("download", "cf_clean_ips.json");
+      document.body.appendChild(downloadAnchor);
+      downloadAnchor.click();
+      downloadAnchor.remove();
+    }
+
+    // Config Integration Logic
+    function applyIPToConfig(ip) {
+      const configInput = document.getElementById('config-input').value.trim();
+      if (!configInput) {
+        alert('لطفاً ابتدا یک کانفیگ VLESS معتبر را در کادر تزریق وارد کنید.');
+        return;
+      }
+
+      try {
+        // vless://uuid@host:port?query#remark
+        if (!configInput.startsWith('vless://')) {
+          alert('قالب کانفیگ نامعتبر است! کانفیگ حتماً باید با vless:// شروع شود.');
+          return;
+        }
+
+        const parts = configInput.split('@');
+        if (parts.length < 2) {
+          alert('قالب کانفیگ VLESS نامعتبر است.');
+          return;
+        }
+
+        const uuidPart = parts[0]; // vless://uuid
+        const remainder = parts[1]; // host:port?query#remark
+        
+        // Extract address details
+        const firstColon = remainder.indexOf(':');
+        if (firstColon === -1) {
+          alert('قالب آدرس کانفیگ نامعتبر است.');
+          return;
+        }
+
+        const currentAddress = remainder.substring(0, firstColon);
+        const rest = remainder.substring(firstColon); // :port?query#remark
+
+        // Generate updated config by substituting the domain with the clean Cloudflare IP
+        updatedConfigStr = `${uuidPart}@${ip}${rest}`;
+        
+        // Show controls
+        document.getElementById('quick-links').style.display = 'flex';
+        alert(`آی‌پی تمیز ${ip} با موفقیت در کانفیگ شما تزریق شد!`);
+      } catch (e) {
+        alert('خطایی در ویرایش کانفیگ پیش آمد: ' + e.message);
+      }
+    }
+
+    function updateConfigWithBestIP() {
+      if (foundIPs.length === 0) {
+        alert('هیچ آی‌پی تمیزی یافت نشده است.');
+        return;
+      }
+      applyIPToConfig(foundIPs[0].ip);
+    }
+
+    function copyUpdatedConfig() {
+      if (!updatedConfigStr) return;
+      navigator.clipboard.writeText(updatedConfigStr).then(() => {
+        alert('کانفیگ جدید و تمیز کپی شد!');
+      });
+    }
+
+    // QR Code visualizer modal
+    let qrGenerator = null;
+    function showQRModal() {
+      if (!updatedConfigStr) return;
+      
+      const modal = document.getElementById('qr-modal');
+      const qrBox = document.getElementById('qrcode');
+      qrBox.innerHTML = ''; // Clear old QRs
+      
+      qrGenerator = new QRCode(qrBox, {
+        text: updatedConfigStr,
+        width: 200,
+        height: 200,
+        colorDark : "#060813",
+        colorLight : "#ffffff",
+        correctLevel : QRCode.CorrectLevel.M
+      });
+
+      modal.classList.add('open');
+    }
+
+    function closeQRModal() {
+      document.getElementById('qr-modal').classList.remove('open');
+    }
+  </script>
+</body>
+</html>
