@@ -140,12 +140,12 @@ const Router = {
   },
 
   async handleUserStatus(url, env) {
-    const username = decodeURIComponent(url.pathname.slice(8));
-    if (!username) {
-      return new Response("Username is required", { status: 400 });
+    const uuid = decodeURIComponent(url.pathname.slice(8));
+    if (!uuid) {
+      return new Response("UUID is required", { status: 400 });
     }
     try {
-      const user = await env.DB.prepare("SELECT * FROM users WHERE username = ? OR uuid = ?").bind(username, username).first();
+      const user = await env.DB.prepare("SELECT * FROM users WHERE uuid = ?").bind(uuid).first();
       if (!user) {
         return new Response("User not found", { status: 404 });
       }
@@ -284,11 +284,18 @@ const Router = {
     // API: تنظیمات آی‌پی پروکسی (GET & POST)
     if (url.pathname === '/api/proxy-ip') {
       if (request.method === 'POST') {
-        const { proxy_ip, iata, frag_len, frag_int } = await request.json();
+        const { proxy_ip, iata, frag_len, frag_int, fragments_list, custom_proxy_ip } = await request.json();
         if (proxy_ip) await env.DB.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES ('proxy_ip', ?)").bind(proxy_ip).run();
         if (iata !== undefined) await env.DB.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES ('proxy_location_iata', ?)").bind(iata).run();
         if (frag_len !== undefined) await env.DB.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES ('frag_len', ?)").bind(frag_len).run();
         if (frag_int !== undefined) await env.DB.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES ('frag_int', ?)").bind(frag_int).run();
+        if (fragments_list !== undefined) {
+          const listStr = typeof fragments_list === 'string' ? fragments_list : JSON.stringify(fragments_list);
+          await env.DB.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES ('fragments_list', ?)").bind(listStr).run();
+        }
+        if (custom_proxy_ip !== undefined) {
+          await env.DB.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES ('custom_proxy_ip', ?)").bind(custom_proxy_ip).run();
+        }
         return new Response(JSON.stringify({ success: true }), { headers: { "Content-Type": "application/json" } });
       }
 
@@ -297,11 +304,23 @@ const Router = {
         const rowIata = await env.DB.prepare("SELECT value FROM settings WHERE key = 'proxy_location_iata'").first();
         const rowLen = await env.DB.prepare("SELECT value FROM settings WHERE key = 'frag_len'").first();
         const rowInt = await env.DB.prepare("SELECT value FROM settings WHERE key = 'frag_int'").first();
+        const rowFragList = await env.DB.prepare("SELECT value FROM settings WHERE key = 'fragments_list'").first();
+        const rowCustomIp = await env.DB.prepare("SELECT value FROM settings WHERE key = 'custom_proxy_ip'").first();
+        
+        let fragmentsList = null;
+        if (rowFragList && rowFragList.value) {
+          try {
+            fragmentsList = JSON.parse(rowFragList.value);
+          } catch(e) {}
+        }
+        
         return new Response(JSON.stringify({
           proxy_ip: rowIp ? rowIp.value : "proxyip.cmliussss.net",
           iata: rowIata ? rowIata.value : "",
-          frag_len: rowLen ? rowLen.value : "20-30",
-          frag_int: rowInt ? rowInt.value : "1-2"
+          frag_len: rowLen ? rowLen.value : "10-20",
+          frag_int: rowInt ? rowInt.value : "1-2",
+          fragments_list: fragmentsList,
+          custom_proxy_ip: rowCustomIp ? rowCustomIp.value : ""
         }), { headers: { "Content-Type": "application/json" } });
       }
     }
@@ -480,106 +499,125 @@ const SubscriptionService = {
     const ports = String(user.port || '443').split(',').map(p => p.trim()).filter(p => p.length > 0);
     const fp = user.fingerprint || 'chrome';
     
-    let fragLen = "20-30";
-    let fragInt = "1-2";
+    let fragments = [];
     try {
-      const rowLen = await env.DB.prepare("SELECT value FROM settings WHERE key = 'frag_len'").first();
-      if (rowLen && rowLen.value) fragLen = rowLen.value;
-      const rowInt = await env.DB.prepare("SELECT value FROM settings WHERE key = 'frag_int'").first();
-      if (rowInt && rowInt.value) fragInt = rowInt.value;
+      const rowFragments = await env.DB.prepare("SELECT value FROM settings WHERE key = 'fragments_list'").first();
+      if (rowFragments && rowFragments.value) {
+        fragments = JSON.parse(rowFragments.value);
+      }
     } catch(e) {}
+
+    if (!Array.isArray(fragments) || fragments.length === 0) {
+      let fragLen = "10-20";
+      let fragInt = "1-2";
+      try {
+        const rowLen = await env.DB.prepare("SELECT value FROM settings WHERE key = 'frag_len'").first();
+        if (rowLen && rowLen.value) fragLen = rowLen.value;
+        const rowInt = await env.DB.prepare("SELECT value FROM settings WHERE key = 'frag_int'").first();
+        if (rowInt && rowInt.value) fragInt = rowInt.value;
+      } catch(e) {}
+      fragments = [{ length: fragLen, interval: fragInt }];
+    }
 
     const configArray = [];
     ips.forEach((ip, ipIndex) => {
       ports.forEach((portStr) => {
-        const isTlsPort = ['443', '2053', '2083', '2087', '2096', '8443'].includes(portStr);
-        const tlsVal = isTlsPort ? 'tls' : 'none';
-        const remark = ips.length > 1 ? `${user.username} - IP ${ipIndex + 1} - Port ${portStr}` : `${user.username} - Port ${portStr}`;
-        
-        const configObj = {
-          remarks: remark,
-          version: { min: "25.10.15" },
-          log: { loglevel: "none" },
-          dns: {
-            servers: [
-              { address: "https://8.8.8.8/dns-query", tag: "remote-dns" },
-              { address: "8.8.8.8", domains: ["full:" + host], skipFallback: true }
+        fragments.forEach((frag, fragIndex) => {
+          const isTlsPort = ['443', '2053', '2083', '2087', '2096', '8443'].includes(portStr);
+          const tlsVal = isTlsPort ? 'tls' : 'none';
+          
+          let remarkParts = [];
+          remarkParts.push(user.username);
+          if (ips.length > 1) remarkParts.push(`IP ${ipIndex + 1}`);
+          remarkParts.push(`Port ${portStr}`);
+          if (fragments.length > 1) remarkParts.push(`Frag ${fragIndex + 1}`);
+          const remark = remarkParts.join(' - ');
+          
+          const configObj = {
+            remarks: remark,
+            version: { min: "25.10.15" },
+            log: { loglevel: "none" },
+            dns: {
+              servers: [
+                { address: "https://8.8.8.8/dns-query", tag: "remote-dns" },
+                { address: "8.8.8.8", domains: ["full:" + host], skipFallback: true }
+              ],
+              queryStrategy: "UseIP",
+              tag: "dns"
+            },
+            inbounds: [
+              {
+                listen: "127.0.0.1", port: 10808, protocol: "socks",
+                settings: { auth: "noauth", udp: true },
+                sniffing: { destOverride: ["http", "tls"], enabled: true, routeOnly: true },
+                tag: "mixed-in"
+              },
+              {
+                listen: "127.0.0.1", port: 10853, protocol: "dokodemo-door",
+                settings: { address: "1.1.1.1", network: "tcp,udp", port: 53 },
+                tag: "dns-in"
+              }
             ],
-            queryStrategy: "UseIP",
-            tag: "dns"
-          },
-          inbounds: [
-            {
-              listen: "127.0.0.1", port: 10808, protocol: "socks",
-              settings: { auth: "noauth", udp: true },
-              sniffing: { destOverride: ["http", "tls"], enabled: true, routeOnly: true },
-              tag: "mixed-in"
-            },
-            {
-              listen: "127.0.0.1", port: 10853, protocol: "dokodemo-door",
-              settings: { address: "1.1.1.1", network: "tcp,udp", port: 53 },
-              tag: "dns-in"
+            outbounds: [
+              {
+                protocol: "vle" + "ss",
+                settings: {
+                  ["vne" + "xt"]: [{
+                    address: ip,
+                    port: parseInt(portStr),
+                    users: [{ id: user.uuid, encryption: "none" }]
+                  }]
+                },
+                ["stream" + "Settings"]: {
+                  network: "ws",
+                  ["ws" + "Settings"]: { host: host, path: "/" },
+                  security: tlsVal,
+                  sockopt: { ["dialer" + "Proxy"]: "fragment" }
+                },
+                tag: "proxy"
+              },
+              {
+                protocol: "freedom",
+                settings: {
+                  fragment: { packets: "tlshello", length: frag.length || frag.len || "10-20", interval: frag.interval || frag.int || "1-2" }
+                },
+                ["stream" + "Settings"]: {
+                  sockopt: {
+                    domainStrategy: "UseIP",
+                    happyEyeballs: { tryDelayMs: 250, prioritizeIPv6: false, interleave: 2, maxConcurrentTry: 4 }
+                  }
+                },
+                tag: "fragment"
+              },
+              { protocol: "dns", settings: { nonIPQuery: "reject" }, tag: "dns-out" },
+              { protocol: "freedom", settings: { domainStrategy: "UseIP" }, tag: "direct" },
+              { protocol: "blackhole", settings: { response: { type: "http" } }, tag: "block" }
+            ],
+            routing: {
+              domainStrategy: "IPIfNonMatch",
+              rules: [
+                { inboundTag: ["mixed-in"], port: 53, outboundTag: "dns-out", type: "field" },
+                { inboundTag: ["dns-in"], outboundTag: "dns-out", type: "field" },
+                { inboundTag: ["remote-dns"], outboundTag: "proxy", type: "field" },
+                { inboundTag: ["dns"], outboundTag: "direct", type: "field" },
+                { domain: ["geosite:private"], outboundTag: "direct", type: "field" },
+                { ip: ["geoip:private"], outboundTag: "direct", type: "field" },
+                { network: "udp", outboundTag: "block", type: "field" },
+                { network: "tcp", outboundTag: "proxy", type: "field" }
+              ]
             }
-          ],
-          outbounds: [
-            {
-              protocol: "vle" + "ss",
-              settings: {
-                ["vne" + "xt"]: [{
-                  address: ip,
-                  port: parseInt(portStr),
-                  users: [{ id: user.uuid, encryption: "none" }]
-                }]
-              },
-              ["stream" + "Settings"]: {
-                network: "ws",
-                ["ws" + "Settings"]: { host: host, path: "/" },
-                security: tlsVal,
-                sockopt: { ["dialer" + "Proxy"]: "fragment" }
-              },
-              tag: "proxy"
-            },
-            {
-              protocol: "freedom",
-              settings: {
-                fragment: { packets: "tlshello", length: fragLen, interval: fragInt }
-              },
-              ["stream" + "Settings"]: {
-                sockopt: {
-                  domainStrategy: "UseIP",
-                  happyEyeballs: { tryDelayMs: 250, prioritizeIPv6: false, interleave: 2, maxConcurrentTry: 4 }
-                }
-              },
-              tag: "fragment"
-            },
-            { protocol: "dns", settings: { nonIPQuery: "reject" }, tag: "dns-out" },
-            { protocol: "freedom", settings: { domainStrategy: "UseIP" }, tag: "direct" },
-            { protocol: "blackhole", settings: { response: { type: "http" } }, tag: "block" }
-          ],
-          routing: {
-            domainStrategy: "IPIfNonMatch",
-            rules: [
-              { inboundTag: ["mixed-in"], port: 53, outboundTag: "dns-out", type: "field" },
-              { inboundTag: ["dns-in"], outboundTag: "dns-out", type: "field" },
-              { inboundTag: ["remote-dns"], outboundTag: "proxy", type: "field" },
-              { inboundTag: ["dns"], outboundTag: "direct", type: "field" },
-              { domain: ["geosite:private"], outboundTag: "direct", type: "field" },
-              { ip: ["geoip:private"], outboundTag: "direct", type: "field" },
-              { network: "udp", outboundTag: "block", type: "field" },
-              { network: "tcp", outboundTag: "proxy", type: "field" }
-            ]
-          }
-        };
-
-        if (tlsVal === 'tls') {
-          configObj.outbounds[0]["stream" + "Settings"]["tls" + "Settings"] = {
-            serverName: host,
-            fingerprint: fp,
-            alpn: ["http/1.1"],
-            allowInsecure: false
           };
-        }
-        configArray.push(configObj);
+
+          if (tlsVal === 'tls') {
+            configObj.outbounds[0]["stream" + "Settings"]["tls" + "Settings"] = {
+              serverName: host,
+              fingerprint: fp,
+              alpn: ["http/1.1"],
+              allowInsecure: false
+            };
+          }
+          configArray.push(configObj);
+        });
       });
     });
 
@@ -1819,44 +1857,86 @@ body { width: 35em; margin: 0 auto; font-family: Tahoma, Verdana, Arial, sans-se
             }
         }
     </script>
-    <style>body { font-family: 'Vazirmatn', sans-serif; }</style>
+    <style>
+        body { font-family: 'Vazirmatn', sans-serif; }
+        
+        /* Modern customizable scrollbars */
+        ::-webkit-scrollbar {
+            width: 8px;
+            height: 8px;
+        }
+        ::-webkit-scrollbar-track {
+            background: transparent;
+        }
+        ::-webkit-scrollbar-thumb {
+            background: rgba(156, 163, 175, 0.25);
+            border-radius: 9999px;
+            border: 2px solid transparent;
+            background-clip: padding-box;
+            transition: background 0.3s ease;
+        }
+        html.dark ::-webkit-scrollbar-thumb {
+            background: rgba(161, 161, 170, 0.15);
+            border: 2px solid transparent;
+            background-clip: padding-box;
+        }
+        ::-webkit-scrollbar-thumb:hover {
+            background: rgba(156, 163, 175, 0.45);
+            border: 2px solid transparent;
+            background-clip: padding-box;
+        }
+        html.dark ::-webkit-scrollbar-thumb:hover {
+            background: rgba(161, 161, 170, 0.35);
+            border: 2px solid transparent;
+            background-clip: padding-box;
+        }
+        
+        /* Firefox Support */
+        * {
+            scrollbar-width: thin;
+            scrollbar-color: rgba(156, 163, 175, 0.25) transparent;
+        }
+        html.dark * {
+            scrollbar-color: rgba(161, 161, 170, 0.15) transparent;
+        }
+    </style>
 </head>
 <body class="bg-gray-50 text-gray-900 dark:bg-amoled-bg dark:text-zinc-100 min-h-screen transition-colors duration-200">
 
-    <header class="border-b border-gray-200 dark:border-amoled-border bg-white dark:bg-amoled-card px-4 py-4">
-        <div class="max-w-6xl mx-auto flex justify-between items-center">
-            <div class="flex flex-col sm:flex-row sm:items-center gap-3">
-                <h1 class="text-lg font-bold flex items-center gap-2" dir="ltr">
-                    Zeus Panel 
-                    <span class="text-xs px-2 py-0.5 font-semibold bg-blue-100 text-blue-800 dark:bg-blue-900/30 dark:text-blue-400 rounded-full">v1.1</span>
+    <header class="sticky top-4 z-40 mx-4 md:mx-auto max-w-6xl my-4 rounded-full bg-white/70 dark:bg-zinc-950/65 backdrop-blur-md border border-gray-250/50 dark:border-zinc-800/80 shadow-lg px-4 md:px-6 py-2.5 transition-all duration-300">
+        <div class="flex items-center justify-between w-full gap-4">
+            <div class="flex items-center gap-3">
+                <h1 class="text-base md:text-lg font-bold flex items-center gap-2" dir="ltr">
+                    <span>Zeus Panel</span>
+                    <span class="text-[10px] md:text-xs px-2 py-0.5 font-semibold bg-blue-100 text-blue-800 dark:bg-blue-900/30 dark:text-blue-400 rounded-full">v1.2</span>
                 </h1>
-                <div class="flex items-center gap-3 bg-gray-100 dark:bg-zinc-800/60 px-3 py-1.5 rounded-full border border-gray-200 dark:border-zinc-800/80 shadow-sm flex-shrink-0 w-fit">
+                <div class="hidden sm:flex items-center gap-3 bg-gray-100/80 dark:bg-zinc-800/40 px-3 py-1 rounded-full border border-gray-200/55 dark:border-zinc-800/50 shadow-sm flex-shrink-0">
                     <a href="https://github.com/AG-Morgan/Zeus-Panel" target="_blank" rel="noopener noreferrer" class="text-gray-700 dark:text-zinc-300 hover:text-black dark:hover:text-white transition-all transform hover:scale-125 duration-200 flex-shrink-0" title="گیت‌هاب">
-                        <svg class="w-[22px] h-[22px] flex-shrink-0" viewBox="0 0 24 24" fill="currentColor">
+                        <svg class="w-[18px] h-[18px] flex-shrink-0" viewBox="0 0 24 24" fill="currentColor">
                             <path fill-rule="evenodd" clip-rule="evenodd" d="M12 2C6.477 2 2 6.477 2 12c0 4.42 2.87 8.17 6.84 9.5.5.08.66-.23.66-.5v-1.69c-2.77.6-3.36-1.34-3.36-1.34-.46-1.16-1.11-1.47-1.11-1.47-.91-.62.07-.6.07-.6 1 .07 1.53 1.03 1.53 1.03.87 1.52 2.34 1.07 2.91.83.09-.65.35-1.09.63-1.34-2.22-.25-4.55-1.11-4.55-4.92 0-1.11.38-2 1.03-2.71-.1-.25-.45-1.29.1-2.64 0 0 .84-.27 2.75 1.02.79-.22 1.65-.33 2.5-.33.85 0 1.71.11 2.5.33 1.91-1.29 2.75-1.02 2.75-1.02.55 1.35.2 2.39.1 2.64.65.71 1.03 1.6 1.03 2.71 0 3.82-2.34 4.66-4.57 4.91.36.31.69.92.69 1.85V21c0 .27.16.59.67.5C19.14 20.16 22 16.42 22 12A10 10 0 0012 2z"/>
                         </svg>
                     </a>
-                    <span class="w-px h-4 bg-gray-300 dark:bg-zinc-700 flex-shrink-0"></span>
+                    <span class="w-px h-3 bg-gray-300 dark:bg-zinc-700 flex-shrink-0"></span>
                     <a href="https://t.me/ag_morgan" target="_blank" rel="noopener noreferrer" class="text-sky-500 hover:text-sky-600 dark:hover:text-sky-400 transition-all transform hover:scale-125 duration-200 flex-shrink-0" title="تلگرام">
-                        <svg class="w-[22px] h-[22px] flex-shrink-0" viewBox="0 0 24 24" fill="currentColor">
+                        <svg class="w-[18px] h-[18px] flex-shrink-0" viewBox="0 0 24 24" fill="currentColor">
                             <path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm4.64 6.8c-.15 1.58-.8 5.42-1.13 7.19-.14.75-.42 1-.68 1.03-.58.05-1.02-.38-1.58-.75-.88-.58-1.38-.94-2.23-1.5-.99-.65-.35-1.01.22-1.59.15-.15 2.71-2.48 2.76-2.69a.2.2 0 00-.05-.18c-.06-.05-.14-.03-.21-.02-.09.02-1.49.94-4.22 2.79-.4.27-.76.41-1.08.4-.36-.01-1.04-.2-1.55-.37-.63-.2-1.12-.31-1.08-.66.02-.18.27-.36.74-.55 2.92-1.27 4.86-2.11 5.83-2.51 2.78-1.16 3.35-1.36 3.73-1.37.08 0 .27.02.39.12.1.08.13.19.14.27-.01.06.01.24 0 .24z"/>
                         </svg>
                     </a>
                 </div>
             </div>
-            <div class="flex items-center gap-3">
-                <button id="theme-toggle" class="p-2 rounded-lg bg-gray-100 dark:bg-amoled-input border border-gray-200 dark:border-amoled-border hover:bg-gray-200 dark:hover:bg-zinc-800 transition">
+            <div class="flex items-center gap-1.5 md:gap-3">
+                <button id="theme-toggle" class="p-2 md:p-2.5 rounded-full bg-gray-100 dark:bg-zinc-900/60 border border-gray-200/50 dark:border-zinc-800/50 hover:bg-gray-200 dark:hover:bg-zinc-800 transition">
                     <svg id="sun-icon" class="w-5 h-5 hidden dark:block text-yellow-500" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 3v1m0 16v1m9-9h-1M4 12H3m15.364-6.364l-.707.707M6.343 17.657l-.707.707m12.728 0l-.707-.707M6.343 6.343l-.707-.707M14 12a2 2 0 11-4 0 2 2 0 014 0z"></path></svg>
                     <svg id="moon-icon" class="w-5 h-5 block dark:hidden text-gray-600" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M20.354 15.354A9 9 0 018.646 3.646 9.003 9.003 0 0012 21a9.003 9.003 0 008.354-5.646z"></path></svg>
                 </button>
-                <button onclick="toggleSettingsModal(true)" class="p-2 rounded-lg bg-gray-100 dark:bg-amoled-input border border-gray-200 dark:border-amoled-border hover:bg-gray-200 dark:hover:bg-zinc-800 transition text-gray-600 dark:text-gray-300 shadow-sm" title="تنظیمات">
-                    <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z"></path><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"></path></svg>
+                <button onclick="toggleSettingsModal(true)" class="p-2 md:p-2.5 rounded-full bg-gray-100 dark:bg-zinc-900/60 border border-gray-200/50 dark:border-zinc-800/50 hover:bg-gray-200 dark:hover:bg-zinc-800 transition text-gray-600 dark:text-gray-300 shadow-sm" title="تنظیمات">
+                    <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z"></path><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"></path></svg>
                 </button>
-                <button onclick="logoutAdmin()" class="p-2 rounded-lg bg-gray-100 dark:bg-amoled-input border border-gray-200 dark:border-amoled-border hover:bg-red-50 dark:hover:bg-red-950/20 transition text-red-600 dark:text-red-400 shadow-sm" title="خروج از حساب">
-                    <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M17 16l4-4m0 0l-4-4m4 4H7m6 4v1a3 3 0 01-3 3H6a3 3 0 01-3-3V7a3 3 0 013-3h4a3 3 0 013 3v1"></path></svg>
+                <button onclick="logoutAdmin()" class="p-2 md:p-2.5 rounded-full bg-gray-100 dark:bg-zinc-900/60 border border-gray-200/50 dark:border-zinc-800/50 hover:bg-red-50 dark:hover:bg-red-950/20 transition text-red-600 dark:text-red-400 shadow-sm" title="خروج از حساب">
+                    <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M17 16l4-4m0 0l-4-4m4 4H7m6 4v1a3 3 0 01-3 3H6a3 3 0 01-3-3V7a3 3 0 013-3h4a3 3 0 013 3v1"></path></svg>
                 </button>
-                <button onclick="openCreateModal()" class="flex items-center justify-center w-10 h-10 bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-700 hover:to-indigo-700 text-white rounded-full shadow-md hover:shadow-lg hover:scale-110 transition-all duration-300" title="کاربر جدید">
-                    <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M12 4v16m8-8H4"></path></svg>
+                <button onclick="openCreateModal()" class="flex items-center justify-center p-2 md:p-2.5 bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-700 hover:to-indigo-700 text-white rounded-full shadow-md hover:shadow-lg hover:scale-105 transition-all duration-300" title="کاربر جدید">
+                    <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M12 4v16m8-8H4"></path></svg>
                 </button>
             </div>
         </div>
@@ -1980,7 +2060,7 @@ body { width: 35em; margin: 0 auto; font-family: Tahoma, Verdana, Arial, sans-se
         </div>
     </main>
 
-    <div id="user-modal" class="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/70 opacity-0 pointer-events-none transition-opacity duration-200 ease-out">
+    <div id="user-modal" class="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm opacity-0 pointer-events-none transition-all duration-300 ease-out">
         <div id="user-modal-card" class="w-full max-w-xl bg-white dark:bg-zinc-950 border border-gray-200 dark:border-zinc-850 rounded-2xl shadow-xl overflow-hidden transition-[opacity,transform] duration-200 opacity-0 scale-95 ease-out flex flex-col max-h-[90vh] transform-gpu" style="will-change: transform, opacity;">
             <div class="px-6 py-4 border-b border-gray-150 dark:border-zinc-800/80 flex justify-between items-center bg-gray-50/50 dark:bg-zinc-900/30">
                 <div class="flex items-center gap-2">
@@ -2105,32 +2185,56 @@ body { width: 35em; margin: 0 auto; font-family: Tahoma, Verdana, Arial, sans-se
                     <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"></path></svg>
                 </button>
             </div>
-            <div class="p-6 space-y-4">
-                <div>
-                    <label class="block text-sm font-medium mb-1.5 text-gray-700 dark:text-zinc-300">موقعیت جغرافیایی پروکسی (Cloudflare)</label>
-                    <div class="relative">
-                        <select id="location-select" class="w-full pl-8 pr-3 py-2.5 bg-white dark:bg-amoled-input border border-gray-300 dark:border-amoled-border rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 text-gray-700 dark:text-zinc-200 cursor-pointer appearance-none">
-                            <option value="">در حال بارگذاری...</option>
-                        </select>
-                        <div class="pointer-events-none absolute inset-y-0 left-0 flex items-center pl-3 text-gray-500 dark:text-zinc-400">
-                            <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"></path></svg>
+            
+            <!-- Modern Tab switcher -->
+            <div class="px-6 pt-4">
+                <div class="flex p-1 bg-gray-100 dark:bg-zinc-900 rounded-full border border-gray-150/50 dark:border-zinc-800/80">
+                    <button type="button" id="tab-btn-core" onclick="switchSettingsTab('core')" class="flex-1 py-2 text-center text-xs md:text-sm font-semibold rounded-full focus:outline-none transition-all duration-300 text-white bg-blue-600 shadow-sm">
+                        ⚙️ هسته
+                    </button>
+                    <button type="button" id="tab-btn-admin" onclick="switchSettingsTab('admin')" class="flex-1 py-2 text-center text-xs md:text-sm font-semibold rounded-full focus:outline-none transition-all duration-300 text-gray-500 dark:text-zinc-400 hover:text-gray-800 dark:hover:text-zinc-200">
+                        👤 پنل مدیریت
+                    </button>
+                </div>
+            </div>
+
+            <div class="p-6">
+                <!-- Tab 1: Core -->
+                <div id="tab-content-core" class="space-y-4">
+                    <div>
+                        <label class="block text-sm font-medium mb-1.5 text-gray-700 dark:text-zinc-300">موقعیت جغرافیایی پروکسی (Cloudflare)</label>
+                        <div class="relative">
+                            <select id="location-select" class="w-full pl-8 pr-3 py-2.5 bg-white dark:bg-amoled-input border border-gray-300 dark:border-amoled-border rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 text-gray-700 dark:text-zinc-200 cursor-pointer appearance-none">
+                                <option value="">در حال بارگذاری...</option>
+                            </select>
+                            <div class="pointer-events-none absolute inset-y-0 left-0 flex items-center pl-3 text-gray-500 dark:text-zinc-400">
+                                <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"></path></svg>
+                            </div>
+                        </div>
+                    </div>
+                    <div>
+                        <label class="block text-sm font-medium mb-1.5 text-gray-700 dark:text-zinc-300">Proxy Ip</label>
+                        <input type="text" id="custom-proxy-ip" class="w-full px-3 py-2.5 bg-white dark:bg-amoled-input border border-gray-300 dark:border-amoled-border rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 text-gray-700 dark:text-zinc-200 font-mono" placeholder="مثال: 1.2.3.4 یا clean.domain.com" dir="ltr">
+                        <p class="text-[10px] text-gray-500 dark:text-zinc-400 mt-1">اولویت بالاتر نسبت به لوکیشن‌های فوق</p>
+                    </div>
+                    <div class="pt-2 border-t border-gray-150 dark:border-zinc-800">
+                        <div class="flex justify-between items-center mb-2">
+                            <span class="text-sm font-semibold text-gray-800 dark:text-zinc-200">تنظیمات فرگمنت (Fragment)</span>
+                            <button type="button" onclick="addNewFragmentRow()" class="px-2.5 py-1 bg-blue-50 hover:bg-blue-100 dark:bg-blue-950/40 dark:hover:bg-blue-900/40 text-blue-600 dark:text-blue-400 font-medium rounded-md text-xs transition flex items-center gap-1">
+                                <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M12 4v16m8-8H4"></path></svg>
+                                <span>افزودن</span>
+                            </button>
+                        </div>
+                        <div id="fragments-list-wrapper" class="space-y-2.5 max-h-[160px] overflow-y-auto pr-1">
+                            <!-- Rows will be injected here dynamically -->
                         </div>
                     </div>
                 </div>
-                <div class="grid grid-cols-2 gap-4 pt-2 border-t border-gray-100 dark:border-zinc-800">
-                    <div>
-                        <label class="block text-sm font-medium mb-1.5 text-gray-700 dark:text-zinc-300">Fragment Length</label>
-                        <input type="text" id="frag-length" placeholder="20-30" class="w-full px-3 py-2.5 bg-white dark:bg-amoled-input border border-gray-300 dark:border-amoled-border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 text-sm text-center font-mono" dir="ltr">
-                    </div>
-                    <div>
-                        <label class="block text-sm font-medium mb-1.5 text-gray-700 dark:text-zinc-300">Fragment Interval</label>
-                        <input type="text" id="frag-interval" placeholder="1-2" class="w-full px-3 py-2.5 bg-white dark:bg-amoled-input border border-gray-300 dark:border-amoled-border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 text-sm text-center font-mono" dir="ltr">
-                    </div>
-                </div>
-                <!-- Change Password Section -->
-                <div class="pt-4 border-t border-gray-100 dark:border-zinc-800">
-                    <h4 class="text-sm font-bold mb-3 text-gray-800 dark:text-zinc-200">🔒 تغییر رمز عبور مدیریت</h4>
+
+                <!-- Tab 2: Admin Panel -->
+                <div id="tab-content-admin" class="space-y-4 hidden">
                     <div class="space-y-3">
+                        <label class="block text-sm font-bold text-gray-800 dark:text-zinc-200">🔒 تغییر رمز عبور مدیریت</label>
                         <div>
                             <label class="block text-[11px] text-gray-500 dark:text-gray-400 font-medium mb-1">رمز عبور فعلی</label>
                             <input type="password" id="change-pwd-current" class="w-full px-3 py-2 bg-white dark:bg-amoled-input border border-gray-300 dark:border-amoled-border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 text-xs font-mono text-center">
@@ -2142,17 +2246,170 @@ body { width: 35em; margin: 0 auto; font-family: Tahoma, Verdana, Arial, sans-se
                         <button type="button" onclick="changeAdminPassword()" id="change-pwd-btn" class="w-full py-2 bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-700 hover:to-indigo-700 text-white font-semibold rounded-lg text-xs transition-all shadow-sm">تغییر رمز عبور</button>
                     </div>
                 </div>
-                <div class="pt-4 flex gap-3">
-                    <button type="button" onclick="toggleSettingsModal(false)" class="flex-1 py-2 bg-gray-100 hover:bg-gray-200 dark:bg-zinc-800 dark:hover:bg-zinc-700 font-medium rounded-lg text-sm transition">انصراف</button>
+
+                <!-- Shared footer -->
+                <div class="pt-4 mt-6 border-t border-gray-100 dark:border-zinc-800 flex gap-3">
+                    <button type="button" onclick="toggleSettingsModal(false)" class="flex-1 py-2 bg-gray-100 hover:bg-gray-200 dark:bg-zinc-800 dark:hover:bg-zinc-700 text-gray-700 dark:text-zinc-300 font-medium rounded-lg text-sm transition">انصراف</button>
                     <button type="button" onclick="saveSettings()" id="save-settings-btn" class="flex-1 py-2 bg-blue-600 hover:bg-blue-700 text-white font-medium rounded-lg text-sm transition">ذخیره تنظیمات</button>
                 </div>
             </div>
         </div>
     </div>
 
+    <div id="links-modal" class="fixed inset-0 z-40 flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm opacity-0 pointer-events-none transition-all duration-300 ease-out animate-none">
+        <div class="w-full max-w-lg bg-white dark:bg-amoled-card border border-gray-200 dark:border-amoled-border rounded-2xl shadow-xl overflow-hidden transition-all transform duration-300 opacity-0 scale-95 ease-out flex flex-col">
+            <div class="px-6 py-4 border-b border-gray-150 dark:border-amoled-border flex justify-between items-center bg-gray-50 dark:bg-zinc-900/50">
+                <h3 class="font-bold text-gray-900 dark:text-zinc-100 flex items-center gap-2 text-sm md:text-base">
+                    <svg class="w-5 h-5 text-indigo-500" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13.828 10.172a4 4 0 00-5.656 0l-4 4a4 4 0 105.656 5.656l1.102-1.101m-.758-4.899a4 4 0 005.656 0l4-4a4 4 0 00-5.656-5.656l-1.1 1.1"></path></svg>
+                    <span>لینک‌های کاربر: </span><span id="links-modal-username" class="text-indigo-600 dark:text-indigo-400"></span>
+                </h3>
+                <button onclick="toggleLinksModal(false)" class="text-gray-400 hover:text-gray-650 dark:hover:text-zinc-200 p-1 rounded-lg hover:bg-gray-100 dark:hover:bg-zinc-800 transition">
+                    <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"></path></svg>
+                </button>
+            </div>
+            <div class="p-6 space-y-6">
+                <!-- ساب متنی -->
+                <div class="space-y-2">
+                    <div class="flex justify-between items-center">
+                        <span class="text-xs font-bold text-zinc-700 dark:text-zinc-300">لینک ساب متنی</span>
+                    </div>
+                    <div class="flex gap-2">
+                        <input id="sub-link-val" type="text" readonly class="flex-1 px-3 py-2 text-xs font-mono bg-gray-50 dark:bg-zinc-900 border border-gray-200 dark:border-zinc-800 rounded-lg text-gray-600 dark:text-zinc-400 focus:outline-none" onclick="this.select()">
+                        <button onclick="copySubLinkFromModal()" class="px-3 py-2 bg-indigo-50 hover:bg-indigo-100 dark:bg-indigo-900/30 dark:hover:bg-indigo-900/50 text-indigo-600 dark:text-indigo-400 rounded-lg text-xs font-medium border border-indigo-200 dark:border-indigo-800 transition flex items-center gap-1 shrink-0">
+                            <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z"></path></svg>
+                            کپی
+                        </button>
+                        <button onclick="showQRFromModal('normal')" class="px-3 py-2 bg-zinc-100 hover:bg-zinc-200 dark:bg-zinc-800 dark:hover:bg-zinc-700 text-gray-700 dark:text-zinc-300 rounded-lg text-xs font-medium transition flex items-center justify-center shrink-0">
+                            <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v1m6 11h2m-6 0h-2v4m0-11v3m0 0h.01M12 12h4.01M16 20h4M4 12h4m12 0h.01M5 8h2a1 1 0 001-1V5a1 1 0 00-1-1H5a1 1 0 00-1 1v2a1 1 0 001 1zm14 0h2a1 1 0 001-1V5a1 1 0 00-1-1h-2a1 1 0 00-1 1v2a1 1 0 001 1zM5 20h2a1 1 0 001-1v-2a1 1 0 00-1-1H5a1 1 0 00-1 1v2a1 1 0 001 1z"></path></svg>
+                        </button>
+                    </div>
+                </div>
+
+                <!-- ساب JSON -->
+                <div class="space-y-2">
+                    <div class="flex justify-between items-center">
+                        <span class="text-xs font-bold text-zinc-700 dark:text-zinc-300">لینک ساب JSON</span>
+                    </div>
+                    <div class="flex gap-2">
+                        <input id="json-sub-link-val" type="text" readonly class="flex-1 px-3 py-2 text-xs font-mono bg-gray-50 dark:bg-zinc-900 border border-gray-200 dark:border-zinc-800 rounded-lg text-gray-600 dark:text-zinc-400 focus:outline-none" onclick="this.select()">
+                        <button onclick="copyJsonSubLinkFromModal()" class="px-3 py-2 bg-purple-50 hover:bg-purple-100 dark:bg-purple-900/30 dark:hover:bg-purple-900/50 text-purple-600 dark:text-purple-400 rounded-lg text-xs font-medium border border-purple-200 dark:border-purple-800 transition flex items-center gap-1 shrink-0">
+                            <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z"></path></svg>
+                            کپی
+                        </button>
+                        <button onclick="showQRFromModal('json')" class="px-3 py-2 bg-zinc-100 hover:bg-zinc-200 dark:bg-zinc-800 dark:hover:bg-zinc-700 text-gray-700 dark:text-zinc-300 rounded-lg text-xs font-medium transition flex items-center justify-center shrink-0">
+                            <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v1m6 11h2m-6 0h-2v4m0-11v3m0 0h.01M12 12h4.01M16 20h4M4 12h4m12 0h.01M5 8h2a1 1 0 001-1V5a1 1 0 00-1-1H5a1 1 0 00-1 1v2a1 1 0 001 1zm14 0h2a1 1 0 001-1V5a1 1 0 00-1-1h-2a1 1 0 00-1 1v2a1 1 0 001 1zM5 20h2a1 1 0 001-1v-2a1 1 0 00-1-1H5a1 1 0 00-1 1v2a1 1 0 001 1z"></path></svg>
+                        </button>
+                    </div>
+                </div>
+
+                <!-- صفحه وضعیت -->
+                <div class="space-y-2">
+                    <div class="flex justify-between items-center">
+                        <span class="text-xs font-bold text-zinc-700 dark:text-zinc-300">صفحه وضعیت کاربر</span>
+                    </div>
+                    <div class="flex gap-2">
+                        <input id="status-link-val" type="text" readonly class="flex-1 px-3 py-2 text-xs font-mono bg-gray-50 dark:bg-zinc-900 border border-gray-200 dark:border-zinc-800 rounded-lg text-gray-600 dark:text-zinc-400 focus:outline-none" onclick="this.select()">
+                        <button onclick="copyStatusLinkFromModal()" class="px-3 py-2 bg-emerald-50 hover:bg-emerald-100 dark:bg-emerald-900/30 dark:hover:bg-emerald-900/50 text-emerald-600 dark:text-emerald-400 rounded-lg text-xs font-medium border border-emerald-200 dark:border-emerald-800 transition flex items-center gap-1 shrink-0">
+                            <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z"></path></svg>
+                            کپی
+                        </button>
+                        <a id="status-link-btn" href="#" target="_blank" class="px-3 py-2 bg-zinc-150 hover:bg-zinc-200 dark:bg-zinc-800 dark:hover:bg-zinc-700 text-gray-750 dark:text-zinc-200 rounded-lg text-xs font-medium transition flex items-center gap-1 shrink-0 justify-center">
+                            <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14"></path></svg>
+                            بازکردن
+                        </a>
+                    </div>
+                </div>
+            </div>
+            <div class="px-6 py-4 bg-gray-50 dark:bg-zinc-900/50 border-t border-gray-150 dark:border-amoled-border flex justify-end">
+                <button onclick="toggleLinksModal(false)" class="px-4 py-2 bg-gray-150 hover:bg-gray-250 dark:bg-zinc-800 dark:hover:bg-zinc-700/80 text-gray-700 dark:text-zinc-300 font-bold rounded-xl text-xs transition duration-200">بستن</button>
+            </div>
+        </div>
+    </div>
+
     <script>
-        window.globalFragLen = "20-30";
+        window.globalFragLen = "10-20";
         window.globalFragInt = "1-2";
+        window.globalFragmentsList = [{ length: "10-20", interval: "1-2" }];
+        window.globalCustomProxyIp = "";
+
+        let activeLinkUsername = '';
+        let activeLinkUuid = '';
+
+        function updateScrollLock() {
+            const modals = ['user-modal', 'qr-modal', 'settings-modal', 'links-modal'];
+            let anyOpen = false;
+            modals.forEach(id => {
+                const el = document.getElementById(id);
+                if (el && el.classList.contains('opacity-100')) {
+                    anyOpen = true;
+                }
+            });
+            if (anyOpen) {
+                document.body.style.overflow = 'hidden';
+            } else {
+                document.body.style.overflow = '';
+            }
+        }
+
+        function toggleLinksModal(show, encodedUsername = '', encodedUuid = '') {
+            const modal = document.getElementById('links-modal');
+            const card = modal.querySelector('div');
+            
+            if (show) {
+                const username = decodeURIComponent(encodedUsername);
+                const uuid = decodeURIComponent(encodedUuid);
+                activeLinkUsername = username;
+                activeLinkUuid = uuid;
+                
+                document.getElementById('links-modal-username').innerText = username;
+                
+                const subLink = getSubLink(username);
+                const jsonSubLink = getJsonSubLink(username);
+                const statusLink = getStatusLink(uuid);
+                
+                document.getElementById('sub-link-val').value = subLink;
+                document.getElementById('json-sub-link-val').value = jsonSubLink;
+                document.getElementById('status-link-val').value = statusLink;
+                document.getElementById('status-link-btn').href = statusLink;
+                
+                modal.classList.remove('opacity-0', 'pointer-events-none');
+                modal.classList.add('opacity-100', 'pointer-events-auto');
+                card.classList.remove('opacity-0', 'scale-95');
+                card.classList.add('opacity-100', 'scale-100');
+            } else {
+                modal.classList.remove('opacity-100', 'pointer-events-auto');
+                modal.classList.add('opacity-0', 'pointer-events-none');
+                card.classList.remove('opacity-100', 'scale-100');
+                card.classList.add('opacity-0', 'scale-95');
+                activeLinkUsername = '';
+                activeLinkUuid = '';
+            }
+            updateScrollLock();
+        }
+
+        function copySubLinkFromModal() {
+            if (activeLinkUsername) {
+                copySubLink(encodeURIComponent(activeLinkUsername));
+            }
+        }
+
+        function copyJsonSubLinkFromModal() {
+            if (activeLinkUsername) {
+                copyJsonSubLink(encodeURIComponent(activeLinkUsername));
+            }
+        }
+
+        function copyStatusLinkFromModal() {
+            if (activeLinkUuid) {
+                copyStatusLink(encodeURIComponent(activeLinkUuid));
+            }
+        }
+
+        function showQRFromModal(type) {
+            if (activeLinkUsername) {
+                showSubQR(encodeURIComponent(activeLinkUsername), type);
+            }
+        }
 
         const tlsPorts = ['443', '2053', '2083', '2087', '2096', '8443'];
         const nonTlsPorts = ['80', '8080', '8880', '2052', '2082', '2086', '2095'];
@@ -2192,19 +2449,109 @@ body { width: 35em; margin: 0 auto; font-family: Tahoma, Verdana, Arial, sans-se
             if (cb443) cb443.checked = true;
         }, 100);
 
+        function switchSettingsTab(tabId) {
+            const btnCore = document.getElementById('tab-btn-core');
+            const btnAdmin = document.getElementById('tab-btn-admin');
+            const contentCore = document.getElementById('tab-content-core');
+            const contentAdmin = document.getElementById('tab-content-admin');
+            const saveBtn = document.getElementById('save-settings-btn');
+            
+            if (tabId === 'core') {
+                btnCore.className = "flex-1 py-2 text-center text-xs md:text-sm font-semibold rounded-full focus:outline-none transition-all duration-300 text-white bg-blue-600 shadow-sm";
+                btnAdmin.className = "flex-1 py-2 text-center text-xs md:text-sm font-semibold rounded-full focus:outline-none transition-all duration-300 text-gray-500 dark:text-zinc-400 hover:text-gray-800 dark:hover:text-zinc-200";
+                contentCore.classList.remove('hidden');
+                contentAdmin.classList.add('hidden');
+                if (saveBtn) saveBtn.classList.remove('hidden');
+            } else {
+                btnCore.className = "flex-1 py-2 text-center text-xs md:text-sm font-semibold rounded-full focus:outline-none transition-all duration-300 text-gray-500 dark:text-zinc-400 hover:text-gray-800 dark:hover:text-zinc-200";
+                btnAdmin.className = "flex-1 py-2 text-center text-xs md:text-sm font-semibold rounded-full focus:outline-none transition-all duration-300 text-white bg-blue-600 shadow-sm";
+                contentCore.classList.add('hidden');
+                contentAdmin.classList.remove('hidden');
+                if (saveBtn) saveBtn.classList.add('hidden');
+            }
+        }
+
         function toggleSettingsModal(show) {
             const modal = document.getElementById('settings-modal');
             const card = modal.querySelector('div');
             if (show) {
+                switchSettingsTab('core');
                 modal.classList.remove('opacity-0', 'pointer-events-none');
                 modal.classList.add('opacity-100', 'pointer-events-auto');
                 card.classList.remove('opacity-0', 'scale-95');
                 card.classList.add('opacity-100', 'scale-100');
+
+                // Instant UI Population
+                const listWrapper = document.getElementById('fragments-list-wrapper');
+                if (listWrapper) {
+                    listWrapper.innerHTML = '';
+                    const frags = window.globalFragmentsList || [];
+                    if (frags.length > 0) {
+                        frags.forEach(frag => {
+                            addNewFragmentRow(frag.length || frag.len || '', frag.interval || frag.int || '');
+                        });
+                    } else {
+                        addNewFragmentRow(window.globalFragLen || '10-20', window.globalFragInt || '1-2');
+                    }
+                }
+
+                const customIpInput = document.getElementById('custom-proxy-ip');
+                if (customIpInput) {
+                    customIpInput.value = window.globalCustomProxyIp || '';
+                }
+
+                const cachedLocations = localStorage.getItem('cached_locations_list');
+                const cachedActiveIata = localStorage.getItem('cached_active_iata') || '';
+                if (cachedLocations) {
+                    try {
+                        const parsedLocs = JSON.parse(cachedLocations);
+                        if (Array.isArray(parsedLocs) && parsedLocs.length > 0) {
+                            renderLocationsUI(parsedLocs, cachedActiveIata);
+                        }
+                    } catch(e) {}
+                }
+
+                loadLocations();
             } else {
                 modal.classList.remove('opacity-100', 'pointer-events-auto');
                 modal.classList.add('opacity-0', 'pointer-events-none');
                 card.classList.remove('opacity-100', 'scale-100');
                 card.classList.add('opacity-0', 'scale-95');
+            }
+            updateScrollLock();
+        }
+
+        function addNewFragmentRow(lengthVal = '', intervalVal = '') {
+            const listWrapper = document.getElementById('fragments-list-wrapper');
+            if (!listWrapper) return;
+            const rowId = 'frag-row-' + Date.now() + '-' + Math.random().toString(36).slice(2, 7);
+            const rowHtml = '<div id="' + rowId + '" class="flex items-center gap-2 bg-gray-50/50 dark:bg-zinc-900/40 p-2 rounded-lg border border-gray-150/50 dark:border-zinc-800/80 frag-config-row">' +
+                '<div class="flex-1">' +
+                    '<label class="block text-[10px] text-gray-500 dark:text-zinc-400 mb-0.5">Length</label>' +
+                    '<input type="text" class="frag-row-len w-full px-2 py-1.5 bg-white dark:bg-amoled-input border border-gray-300 dark:border-amoled-border rounded-md text-xs text-center font-mono focus:outline-none focus:ring-1 focus:ring-blue-500" placeholder="10-20" value="' + lengthVal + '" dir="ltr">' +
+                '</div>' +
+                '<div class="flex-1">' +
+                    '<label class="block text-[10px] text-gray-500 dark:text-zinc-400 mb-0.5">Interval</label>' +
+                    '<input type="text" class="frag-row-int w-full px-2 py-1.5 bg-white dark:bg-amoled-input border border-gray-300 dark:border-amoled-border rounded-md text-xs text-center font-mono focus:outline-none focus:ring-1 focus:ring-blue-500" placeholder="1-2" value="' + intervalVal + '" dir="ltr">' +
+                '</div>' +
+                '<div class="self-end pb-0.5">' +
+                    '<button type="button" onclick="removeFragmentRow(\\\'' + rowId + '\\\')" class="p-1.5 text-red-500 hover:text-red-700 hover:bg-red-50 dark:hover:bg-red-950/30 rounded-md transition" title="حذف">' +
+                        '<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"></path></svg>' +
+                    '</button>' +
+                '</div>' +
+            '</div>';
+            listWrapper.insertAdjacentHTML('beforeend', rowHtml);
+        }
+
+        function removeFragmentRow(rowId) {
+            const row = document.getElementById(rowId);
+            if (row) {
+                const listWrapper = document.getElementById('fragments-list-wrapper');
+                if (listWrapper.querySelectorAll('.frag-config-row').length > 1) {
+                    row.remove();
+                } else {
+                    alert('⚠️ شما باید حداقل یک تنظیم فرگمنت داشته باشید!');
+                }
             }
         }
 
@@ -2231,6 +2578,7 @@ body { width: 35em; margin: 0 auto; font-family: Tahoma, Verdana, Arial, sans-se
                 const cb443 = document.querySelector('input[name="ports"][value="443"]');
                 if (cb443) cb443.checked = true;
             }
+            updateScrollLock();
         }
 
         function openCreateModal() {
@@ -2485,40 +2833,17 @@ body { width: 35em; margin: 0 auto; font-family: Tahoma, Verdana, Arial, sans-se
                                     '<div class="flex gap-1.5">' +
                                         '<button onclick="copyConfig(\\'' + encodeURIComponent(user.username) + '\\')" title="کپی کانفیگ" class="p-1.5 bg-white dark:bg-zinc-800 border border-gray-200 dark:border-zinc-700 hover:bg-blue-50 dark:hover:bg-blue-900/30 text-blue-600 dark:text-blue-400 rounded-md transition shadow-sm"><svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z"></path></svg></button>' +
                                         '<button onclick="copyJsonConfig(\\'' + encodeURIComponent(user.username) + '\\')" title="کپی JSON" class="p-1.5 bg-white dark:bg-zinc-800 border border-gray-200 dark:border-zinc-700 hover:bg-purple-50 dark:hover:bg-purple-900/30 text-purple-600 dark:text-purple-400 rounded-md transition shadow-sm"><svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10 20l4-16m4 4l4 4-4 4M6 16l-4-4 4-4"></path></svg></button>' +
-                                        '<button onclick="showQR(\\'' + encodeURIComponent(user.username) + '\\')" title="کد QR" class="p-1.5 bg-white dark:bg-zinc-800 border border-gray-200 dark:border-zinc-700 hover:bg-green-50 dark:hover:bg-green-900/30 text-green-600 dark:text-green-400 rounded-md transition shadow-sm"><svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v1m6 11h2m-6 0h-2v4m0-11v3m0 0h.01M12 12h4.01M16 20h4M4 12h4m12 0h.01M5 8h2a1 1 0 001-1V5a1 1 0 00-1-1H5a1 1 0 00-1 1v2a1 1 0 001 1zm14 0h2a1 1 0 001-1V5a1 1 0 00-1-1h-2a1 1 0 00-1 1v2a1 1 0 001 1zM5 20h2a1 1 0 001-1v-2a1 1 0 00-1-1H5a1 1 0 00-1 1v2a1 1 0 001 1z"></path></svg></button>' +
                                         '<button onclick="toggleUserStatus(\\'' + encodeURIComponent(user.username) + '\\')" title="' + statusBtnTitle + '" class="p-1.5 bg-white dark:bg-zinc-800 border border-gray-200 dark:border-zinc-700 ' + statusBtnColor + ' rounded-md transition shadow-sm">' + statusBtnIcon + '</button>' +
                                         '<button onclick="editUser(\\'' + encodeURIComponent(user.username) + '\\')" title="ویرایش" class="p-1.5 bg-white dark:bg-zinc-800 border border-gray-200 dark:border-zinc-700 hover:bg-yellow-50 dark:hover:bg-yellow-900/30 text-yellow-600 dark:text-yellow-400 rounded-md transition shadow-sm"><svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z"></path></svg></button>' +
                                         '<button onclick="deleteUser(\\'' + encodeURIComponent(user.username) + '\\')" title="حذف" class="p-1.5 bg-white dark:bg-zinc-800 border border-gray-200 dark:border-zinc-700 hover:bg-red-50 dark:hover:bg-red-950/20 text-red-600 dark:text-red-400 rounded-md transition shadow-sm"><svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"></path></svg></button>' +
                                     '</div>' +
                                 '</div>' +
                             '</td>' +
-                            '<td class="p-4">' +
-                                '<div class="flex flex-col gap-2 min-w-[140px]">' +
-                                    '<div class="flex gap-1">' +
-                                        '<button onclick="copySubLink(\\'' + encodeURIComponent(user.username) + '\\')" class="flex-1 flex items-center justify-center gap-1.5 px-2 py-1.5 bg-indigo-50 dark:bg-indigo-900/30 text-indigo-600 dark:text-indigo-400 hover:bg-indigo-100 dark:hover:bg-indigo-900/50 rounded-lg text-xs font-bold transition border border-indigo-200 dark:border-indigo-800">' +
-                                            '<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13.828 10.172a4 4 0 00-5.656 0l-4 4a4 4 0 105.656 5.656l1.102-1.101m-.758-4.899a4 4 0 005.656 0l4-4a4 4 0 00-5.656-5.656l-1.1 1.1"></path></svg>' +
-                                            'ساب متنی' +
-                                        '</button>' +
-                                        '<button onclick="showSubQR(\\'' + encodeURIComponent(user.username) + '\\', \\'normal\\')" title="QR ساب متنی" class="px-2 py-1.5 bg-indigo-50 dark:bg-indigo-900/30 text-indigo-600 dark:text-indigo-400 hover:bg-indigo-100 dark:hover:bg-indigo-900/50 rounded-lg text-xs font-bold transition border border-indigo-200 dark:border-indigo-800">' +
-                                            '<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v1m6 11h2m-6 0h-2v4m0-11v3m0 0h.01M12 12h4.01M16 20h4M4 12h4m12 0h.01M5 8h2a1 1 0 001-1V5a1 1 0 00-1-1H5a1 1 0 00-1 1v2a1 1 0 001 1zm14 0h2a1 1 0 001-1V5a1 1 0 00-1-1h-2a1 1 0 00-1 1v2a1 1 0 001 1zM5 20h2a1 1 0 001-1v-2a1 1 0 00-1-1H5a1 1 0 00-1 1v2a1 1 0 001 1z"></path></svg>' +
-                                        '</button>' +
-                                    '</div>' +
-                                    '<div class="flex gap-1">' +
-                                        '<button onclick="copyJsonSubLink(\\'' + encodeURIComponent(user.username) + '\\')" class="flex-1 flex items-center justify-center gap-1.5 px-2 py-1.5 bg-purple-50 dark:bg-purple-900/30 text-purple-600 dark:text-purple-400 hover:bg-purple-100 dark:hover:bg-purple-900/50 rounded-lg text-xs font-bold transition border border-purple-200 dark:border-purple-800">' +
-                                            '<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10 20l4-16m4 4l4 4-4 4M6 16l-4-4 4-4"></path></svg>' +
-                                            'ساب JSON' +
-                                        '</button>' +
-                                        '<button onclick="showSubQR(\\'' + encodeURIComponent(user.username) + '\\', \\'json\\')" title="QR ساب JSON" class="px-2 py-1.5 bg-purple-50 dark:bg-purple-900/30 text-purple-600 dark:text-purple-400 hover:bg-purple-100 dark:hover:bg-purple-900/50 rounded-lg text-xs font-bold transition border border-purple-200 dark:border-purple-800">' +
-                                            '<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v1m6 11h2m-6 0h-2v4m0-11v3m0 0h.01M12 12h4.01M16 20h4M4 12h4m12 0h.01M5 8h2a1 1 0 001-1V5a1 1 0 00-1-1H5a1 1 0 00-1 1v2a1 1 0 001 1zm14 0h2a1 1 0 001-1V5a1 1 0 00-1-1h-2a1 1 0 00-1 1v2a1 1 0 001 1zM5 20h2a1 1 0 001-1v-2a1 1 0 00-1-1H5a1 1 0 00-1 1v2a1 1 0 001 1z"></path></svg>' +
-                                        '</button>' +
-                                    '</div>' +
-                                    '<div class="flex gap-1">' +
-                                        '<button onclick="copyStatusLink(\\'' + encodeURIComponent(user.username) + '\\')" class="flex-1 flex items-center justify-center gap-1.5 px-2 py-1.5 bg-emerald-50 dark:bg-emerald-900/30 text-emerald-600 dark:text-emerald-400 hover:bg-emerald-100 dark:hover:bg-emerald-900/50 rounded-lg text-xs font-bold transition border border-emerald-200 dark:border-emerald-800">' +
-                                            '<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14"></path></svg>' +
-                                            'صفحه وضعیت' +
-                                        '</button>' +
-                                    '</div>' +
-                                '</div>' +
+                            '<td class="p-4 text-center">' +
+                                '<button onclick="toggleLinksModal(true, \\'' + encodeURIComponent(user.username) + '\\', \\'' + encodeURIComponent(user.uuid) + '\\')" class="mx-auto flex items-center justify-center gap-1.5 px-3 py-1.5 bg-indigo-50 dark:bg-indigo-900/20 text-indigo-600 dark:text-indigo-400 hover:bg-indigo-100 dark:hover:bg-indigo-900/40 rounded-lg text-xs font-bold transition border border-indigo-200 dark:border-indigo-800 shadow-sm">' +
+                                    '<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13.828 10.172a4 4 0 00-5.656 0l-4 4a4 4 0 105.656 5.656l1.102-1.101m-.758-4.899a4 4 0 005.656 0l4-4a4 4 0 00-5.656-5.656l-1.1 1.1"></path></svg>' +
+                                    'لینک‌ها' +
+                                '</button>' +
                             '</td>' +
                             '<td class="p-4 text-xs font-mono uppercase text-blue-500 font-semibold">VLESS</td>' +
                             '<td class="p-4 text-xs">' + 
@@ -2635,6 +2960,7 @@ body { width: 35em; margin: 0 auto; font-family: Tahoma, Verdana, Arial, sans-se
                 card.classList.remove('opacity-100', 'scale-100');
                 card.classList.add('opacity-0', 'scale-95');
             }
+            updateScrollLock();
         }
 
         function getVlessLink(username) {
@@ -2675,8 +3001,8 @@ body { width: 35em; margin: 0 auto; font-family: Tahoma, Verdana, Arial, sans-se
             return window.location.origin + '/feed/json/' + encodeURIComponent(username);
         }
 
-        function getStatusLink(username) {
-            return window.location.origin + '/status/' + encodeURIComponent(username);
+        function getStatusLink(uuid) {
+            return window.location.origin + '/status/' + encodeURIComponent(uuid);
         }
 
         function copySubLink(encodedUsername) {
@@ -2688,9 +3014,9 @@ body { width: 35em; margin: 0 auto; font-family: Tahoma, Verdana, Arial, sans-se
             });
         }
 
-        function copyStatusLink(encodedUsername) {
-            const username = decodeURIComponent(encodedUsername);
-            navigator.clipboard.writeText(getStatusLink(username)).then(() => {
+        function copyStatusLink(encodedUuid) {
+            const uuid = decodeURIComponent(encodedUuid);
+            navigator.clipboard.writeText(getStatusLink(uuid)).then(() => {
                 alert('✅ لینک صفحه وضعیت با موفقیت کپی شد!');
             }).catch(() => {
                 alert('خطا در کپی کردن لینک صفحه وضعیت!');
@@ -2740,96 +3066,109 @@ body { width: 35em; margin: 0 auto; font-family: Tahoma, Verdana, Arial, sans-se
             const ports = String(user.port || '443').split(',').map(p => p.trim()).filter(p => p.length > 0);
             const fp = user.fingerprint || 'chrome';
 
+            let fragments = window.globalFragmentsList;
+            if (!Array.isArray(fragments) || fragments.length === 0) {
+                fragments = [{ length: window.globalFragLen || "10-20", interval: window.globalFragInt || "1-2" }];
+            }
+
             const configArray = [];
             ips.forEach((ip, ipIndex) => {
               ports.forEach((portStr) => {
-                const isTlsPort = tlsPorts.includes(portStr);
-                const tlsVal = isTlsPort ? 'tls' : 'none';
-                const remark = ips.length > 1 ? (user.username + ' - IP ' + (ipIndex + 1) + ' - Port ' + portStr) : (user.username + ' - Port ' + portStr);
-                
-                const jsonConfig = {
-                  "remarks": remark,
-                  "version": { "min": "25.10.15" },
-                  "log": { "loglevel": "none" },
-                  "dns": {
-                    "servers": [
-                      { "address": "https://8.8.8.8/dns-query", "tag": "remote-dns" },
-                      { "address": "8.8.8.8", "domains": ["full:" + host], "skipFallback": true }
+                fragments.forEach((frag, fragIndex) => {
+                  const isTlsPort = tlsPorts.includes(portStr);
+                  const tlsVal = isTlsPort ? 'tls' : 'none';
+                  
+                  let remarkParts = [];
+                  remarkParts.push(user.username);
+                  if (ips.length > 1) remarkParts.push('IP ' + (ipIndex + 1));
+                  remarkParts.push('Port ' + portStr);
+                  if (fragments.length > 1) remarkParts.push('Frag ' + (fragIndex + 1));
+                  const remark = remarkParts.join(' - ');
+                  
+                  const jsonConfig = {
+                    "remarks": remark,
+                    "version": { "min": "25.10.15" },
+                    "log": { "loglevel": "none" },
+                    "dns": {
+                      "servers": [
+                        { "address": "https://8.8.8.8/dns-query", "tag": "remote-dns" },
+                        { "address": "8.8.8.8", "domains": ["full:" + host], "skipFallback": true }
+                      ],
+                      "queryStrategy": "UseIP",
+                      "tag": "dns"
+                    },
+                    "inbounds": [
+                      {
+                        "listen": "127.0.0.1", "port": 10808, "protocol": "socks",
+                        "settings": { "auth": "noauth", "udp": true },
+                        "sniffing": { "destOverride": ["http", "tls"], "enabled": true, "routeOnly": true },
+                        "tag": "mixed-in"
+                      },
+                      {
+                        "listen": "127.0.0.1", "port": 10853, "protocol": "dokodemo-door",
+                        "settings": { "address": "1.1.1.1", "network": "tcp,udp", "port": 53 },
+                        "tag": "dns-in"
+                      }
                     ],
-                    "queryStrategy": "UseIP",
-                    "tag": "dns"
-                  },
-                  "inbounds": [
-                    {
-                      "listen": "127.0.0.1", "port": 10808, "protocol": "socks",
-                      "settings": { "auth": "noauth", "udp": true },
-                      "sniffing": { "destOverride": ["http", "tls"], "enabled": true, "routeOnly": true },
-                      "tag": "mixed-in"
-                    },
-                    {
-                      "listen": "127.0.0.1", "port": 10853, "protocol": "dokodemo-door",
-                      "settings": { "address": "1.1.1.1", "network": "tcp,udp", "port": 53 },
-                      "tag": "dns-in"
+                    "outbounds": [
+                      {
+                        "protocol": "vle" + "ss",
+                        "settings": {
+                          ["vne" + "xt"]: [
+                            { "address": ip, "port": parseInt(portStr), "users": [{ "id": user.uuid, "encryption": "none" }] }
+                          ]
+                        },
+                        ["stream" + "Settings"]: {
+                          "network": "ws",
+                          ["ws" + "Settings"]: { "host": host, "path": "/" },
+                          "security": tlsVal,
+                          "sockopt": { ["dialer" + "Proxy"]: "fragment" }
+                        },
+                        "tag": "proxy"
+                      },
+                      {
+                        "protocol": "freedom",
+                        "settings": {
+                          "fragment": {
+                            "packets": "tlshello",
+                            "length": frag.length || frag.len || window.globalFragLen || "10-20",
+                            "interval": frag.interval || frag.int || window.globalFragInt || "1-2"
+                          }
+                        },
+                        "streamSettings": {
+                          "sockopt": {
+                            "domainStrategy": "UseIP",
+                            "happyEyeballs": { "tryDelayMs": 250, "prioritizeIPv6": false, "interleave": 2, "maxConcurrentTry": 4 }
+                          }
+                        },
+                        "tag": "fragment"
+                      },
+                      { "protocol": "dns", "settings": { "nonIPQuery": "reject" }, "tag": "dns-out" },
+                      { "protocol": "freedom", "settings": { "domainStrategy": "UseIP" }, "tag": "direct" },
+                      { "protocol": "blackhole", "settings": { "response": { "type": "http" } }, "tag": "block" }
+                    ],
+                    "routing": {
+                      "domainStrategy": "IPIfNonMatch",
+                      "rules": [
+                        { "inboundTag": ["mixed-in"], "port": 53, "outboundTag": "dns-out", "type": "field" },
+                        { "inboundTag": ["dns-in"], "outboundTag": "dns-out", "type": "field" },
+                        { "inboundTag": ["remote-dns"], "outboundTag": "proxy", "type": "field" },
+                        { "inboundTag": ["dns"], "outboundTag": "direct", "type": "field" },
+                        { "domain": ["geosite:private"], "outboundTag": "direct", "type": "field" },
+                        { "ip": ["geoip:private"], "outboundTag": "direct", "type": "field" },
+                        { "network": "udp", "outboundTag": "block", "type": "field" },
+                        { "network": "tcp", "outboundTag": "proxy", "type": "field" }
+                      ]
                     }
-                  ],
-                  "outbounds": [
-                    {
-                      "protocol": "vle" + "ss",
-                      "settings": {
-                        ["vne" + "xt"]: [
-                          { "address": ip, "port": parseInt(portStr), "users": [{ "id": user.uuid, "encryption": "none" }] }
-                        ]
-                      },
-                      ["stream" + "Settings"]: {
-                        "network": "ws",
-                        ["ws" + "Settings"]: { "host": host, "path": "/" },
-                        "security": tlsVal,
-                        "sockopt": { ["dialer" + "Proxy"]: "fragment" }
-                      },
-                      "tag": "proxy"
-                    },
-                    {
-                      "protocol": "freedom",
-                      "settings": {
-                        "fragment": {
-                          "packets": "tlshello",
-                          "length": window.globalFragLen || "20-30",
-                          "interval": window.globalFragInt || "1-2"
-                        }
-                      },
-                      "streamSettings": {
-                        "sockopt": {
-                          "domainStrategy": "UseIP",
-                          "happyEyeballs": { "tryDelayMs": 250, "prioritizeIPv6": false, "interleave": 2, "maxConcurrentTry": 4 }
-                        }
-                      },
-                      "tag": "fragment"
-                    },
-                    { "protocol": "dns", "settings": { "nonIPQuery": "reject" }, "tag": "dns-out" },
-                    { "protocol": "freedom", "settings": { "domainStrategy": "UseIP" }, "tag": "direct" },
-                    { "protocol": "blackhole", "settings": { "response": { "type": "http" } }, "tag": "block" }
-                  ],
-                  "routing": {
-                    "domainStrategy": "IPIfNonMatch",
-                    "rules": [
-                      { "inboundTag": ["mixed-in"], "port": 53, "outboundTag": "dns-out", "type": "field" },
-                      { "inboundTag": ["dns-in"], "outboundTag": "dns-out", "type": "field" },
-                      { "inboundTag": ["remote-dns"], "outboundTag": "proxy", "type": "field" },
-                      { "inboundTag": ["dns"], "outboundTag": "direct", "type": "field" },
-                      { "domain": ["geosite:private"], "outboundTag": "direct", "type": "field" },
-                      { "ip": ["geoip:private"], "outboundTag": "direct", "type": "field" },
-                      { "network": "udp", "outboundTag": "block", "type": "field" },
-                      { "network": "tcp", "outboundTag": "proxy", "type": "field" }
-                    ]
-                  }
-                };
-                
-                if (tlsVal === 'tls') {
-                  jsonConfig.outbounds[0]["stream" + "Settings"]["tls" + "Settings"] = {
-                    "serverName": host, "fingerprint": fp, "alpn": ["http/1.1"], "allowInsecure": false
                   };
-                }
-                configArray.push(jsonConfig);
+                  
+                  if (tlsVal === 'tls') {
+                    jsonConfig.outbounds[0]["stream" + "Settings"]["tls" + "Settings"] = {
+                      "serverName": host, "fingerprint": fp, "alpn": ["http/1.1"], "allowInsecure": false
+                    };
+                  }
+                  configArray.push(jsonConfig);
+                });
               });
             });
 
@@ -2909,6 +3248,7 @@ body { width: 35em; margin: 0 auto; font-family: Tahoma, Verdana, Arial, sans-se
 
         function renderLocationsUI(locations, activeIata) {
             const select = document.getElementById('location-select');
+            if (!select) return;
             locations.sort((a, b) => (a.cca2 || '').localeCompare(b.cca2 || ''));
 
             let html = '<option value="">🌐 پیش‌فرض (لوکیشن خودکار)</option>';
@@ -2924,6 +3264,7 @@ body { width: 35em; margin: 0 auto; font-family: Tahoma, Verdana, Arial, sans-se
 
         async function loadLocations() {
             const select = document.getElementById('location-select');
+            if (!select) return;
             const cachedLocations = localStorage.getItem('cached_locations_list');
             const cachedActiveIata = localStorage.getItem('cached_active_iata') || '';
             let hasCachedLocs = false;
@@ -2939,29 +3280,42 @@ body { width: 35em; margin: 0 auto; font-family: Tahoma, Verdana, Arial, sans-se
             }
             
             try {
-                const statusRes = await fetch('/api/proxy-ip');
-                let activeIata = '';
-                if (statusRes.ok) {
+                const [statusRes, res] = await Promise.all([
+                    fetch('/api/proxy-ip'),
+                    fetch('/locations').catch(() => null)
+                ]);
+
+                let activeIata = cachedActiveIata;
+                if (statusRes && statusRes.ok) {
                     const statusData = await statusRes.json();
                     activeIata = statusData.iata || '';
                     localStorage.setItem('cached_active_iata', activeIata);
                     
-                    if(statusData.frag_len) {
-                        window.globalFragLen = statusData.frag_len;
-                        document.getElementById('frag-length').value = statusData.frag_len;
+                    if (statusData.fragments_list && Array.isArray(statusData.fragments_list) && statusData.fragments_list.length > 0) {
+                        window.globalFragmentsList = statusData.fragments_list;
+                    } else {
+                        const defLen = statusData.frag_len || '10-20';
+                        const defInt = statusData.frag_int || '1-2';
+                        window.globalFragmentsList = [{ length: defLen, interval: defInt }];
                     }
-                    if(statusData.frag_int) {
-                        window.globalFragInt = statusData.frag_int;
-                        document.getElementById('frag-interval').value = statusData.frag_int;
+                    if (statusData.frag_len) window.globalFragLen = statusData.frag_len;
+                    if (statusData.frag_int) window.globalFragInt = statusData.frag_int;
+                    if (statusData.hasOwnProperty('custom_proxy_ip')) {
+                        window.globalCustomProxyIp = statusData.custom_proxy_ip || '';
+                        const customIpInput = document.getElementById('custom-proxy-ip');
+                        if (customIpInput) {
+                            customIpInput.value = window.globalCustomProxyIp;
+                        }
                     }
                 }
 
-                const res = await fetch('/locations');
-                if (!res.ok) throw new Error();
-                const locations = await res.json();
-                
-                localStorage.setItem('cached_locations_list', JSON.stringify(locations));
-                renderLocationsUI(locations, activeIata);
+                if (res && res.ok) {
+                    const locations = await res.json();
+                    localStorage.setItem('cached_locations_list', JSON.stringify(locations));
+                    renderLocationsUI(locations, activeIata);
+                } else if (hasCachedLocs) {
+                    select.value = activeIata;
+                }
             } catch (err) {
                 if (!hasCachedLocs) {
                     select.innerHTML = '<option value="">⚠️ خطا در دریافت لوکیشن‌ها</option>';
@@ -2971,17 +3325,40 @@ body { width: 35em; margin: 0 auto; font-family: Tahoma, Verdana, Arial, sans-se
 
         async function saveSettings() {
             const select = document.getElementById('location-select');
-            const fragLen = document.getElementById('frag-length').value || "20-30";
-            const fragInt = document.getElementById('frag-interval').value || "1-2";
+            if (!select) return;
             const iata = select.value;
             const btn = document.getElementById('save-settings-btn');
+            if (!btn) return;
+            
+            const customIpInput = document.getElementById('custom-proxy-ip');
+            const customIp = customIpInput ? customIpInput.value.trim() : '';
+            
+            const fragments = [];
+            const rows = document.querySelectorAll('.frag-config-row');
+            rows.forEach(row => {
+                const len = row.querySelector('.frag-row-len').value.trim();
+                const interval = row.querySelector('.frag-row-int').value.trim();
+                if (len !== "" && interval !== "") {
+                    fragments.push({ length: len, interval: interval });
+                }
+            });
+
+            if (fragments.length === 0) {
+                alert('⚠️ لطفا فیلدهای تنظیم فرگمنت را پر کنید یا ردیف‌های اضافی را حذف کنید!');
+                return;
+            }
+
+            const fragLen = fragments[0].length || '10-20';
+            const fragInt = fragments[0].interval || '1-2';
             
             btn.disabled = true;
             btn.innerText = 'در حال ذخیره...';
             
             try {
                 let resolvedIp = 'proxyip.cmliussss.net';
-                if (iata) {
+                if (customIp) {
+                    resolvedIp = customIp;
+                } else if (iata) {
                     const domain = iata.toLowerCase() + '.proxyip.cmliussss.net';
                     const dnsRes = await fetch('https://cloudflare-dns.com/dns-query?name=' + domain + '&type=A', {
                         headers: { 'accept': 'application/dns-json' }
@@ -3001,13 +3378,24 @@ body { width: 35em; margin: 0 auto; font-family: Tahoma, Verdana, Arial, sans-se
                 const response = await fetch('/api/proxy-ip', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ proxy_ip: resolvedIp, iata: iata ? iata.toUpperCase() : '', frag_len: fragLen, frag_int: fragInt })
+                    body: JSON.stringify({ 
+                        proxy_ip: resolvedIp, 
+                        iata: customIp ? '' : (iata ? iata.toUpperCase() : ''), 
+                        frag_len: fragLen, 
+                        frag_int: fragInt,
+                        fragments_list: fragments,
+                        custom_proxy_ip: customIp
+                    })
                 });
 
                 if (response.ok) {
                     window.globalFragLen = fragLen;
                     window.globalFragInt = fragInt;
-                    alert('✅ تنظیمات با موفقیت ذخیره شد.\\n' + (iata ? 'آی‌پی پروکسی کلودفلر: ' + resolvedIp : 'آدرس پروکسی به حالت پیش‌فرض بازگشت.'));
+                    window.globalFragmentsList = fragments;
+                    window.globalCustomProxyIp = customIp;
+                    localStorage.setItem('cached_active_iata', customIp ? '' : iata);
+                    
+                    alert('✅ تنظیمات با موفقیت ذخیره شد.\\n' + (customIp ? 'آی‌پی پروکسی شخصی: ' + customIp : (iata ? 'آی‌پی پروکسی کلودفلر: ' + resolvedIp : 'آدرس پروکسی به حالت پیش‌فرض بازگشت.')));
                     toggleSettingsModal(false);
                 } else {
                     alert('خطا در ذخیره تنظیمات');
@@ -3075,6 +3463,25 @@ body { width: 35em; margin: 0 auto; font-family: Tahoma, Verdana, Arial, sans-se
             loadUsers();
             loadLocations();
             setInterval(() => loadUsers(true), 60000);
+            
+            // به‌روزرسانی مداوم تنظیمات و فرگمنت‌ها در پس‌زمینه بدون نیاز به رفرش
+            setInterval(() => {
+                fetch('/api/proxy-ip')
+                    .then(res => res.ok ? res.json() : null)
+                    .then(statusData => {
+                        if (statusData) {
+                            if (statusData.fragments_list && Array.isArray(statusData.fragments_list) && statusData.fragments_list.length > 0) {
+                                window.globalFragmentsList = statusData.fragments_list;
+                            } else {
+                                const defLen = statusData.frag_len || '10-20';
+                                const defInt = statusData.frag_int || '1-2';
+                                window.globalFragmentsList = [{ length: defLen, interval: defInt }];
+                            }
+                            if (statusData.frag_len) window.globalFragLen = statusData.frag_len;
+                            if (statusData.frag_int) window.globalFragInt = statusData.frag_int;
+                        }
+                    }).catch(() => {});
+            }, 30000);
         });
     </script>
 </body>
@@ -3107,6 +3514,46 @@ body { width: 35em; margin: 0 auto; font-family: Tahoma, Verdana, Arial, sans-se
             backdrop-filter: blur(12px);
             -webkit-backdrop-filter: blur(12px);
             border: 1px solid rgba(255, 255, 255, 0.05);
+        }
+        
+        /* Modern customizable scrollbars */
+        ::-webkit-scrollbar {
+            width: 8px;
+            height: 8px;
+        }
+        ::-webkit-scrollbar-track {
+            background: transparent;
+        }
+        ::-webkit-scrollbar-thumb {
+            background: rgba(156, 163, 175, 0.25);
+            border-radius: 9999px;
+            border: 2px solid transparent;
+            background-clip: padding-box;
+            transition: background 0.3s ease;
+        }
+        html.dark ::-webkit-scrollbar-thumb {
+            background: rgba(161, 161, 170, 0.15);
+            border: 2px solid transparent;
+            background-clip: padding-box;
+        }
+        ::-webkit-scrollbar-thumb:hover {
+            background: rgba(156, 163, 175, 0.45);
+            border: 2px solid transparent;
+            background-clip: padding-box;
+        }
+        html.dark ::-webkit-scrollbar-thumb:hover {
+            background: rgba(161, 161, 170, 0.35);
+            border: 2px solid transparent;
+            background-clip: padding-box;
+        }
+        
+        /* Firefox Support */
+        * {
+            scrollbar-width: thin;
+            scrollbar-color: rgba(156, 163, 175, 0.25) transparent;
+        }
+        html.dark * {
+            scrollbar-color: rgba(161, 161, 170, 0.15) transparent;
         }
     </style>
 </head>
@@ -3158,7 +3605,7 @@ body { width: 35em; margin: 0 auto; font-family: Tahoma, Verdana, Arial, sans-se
                     </span>
                     <span id="expiry-pct" class="text-xs font-bold text-purple-500">۰٪</span>
                 </div>
-                <div class="w-full bg-gray-200 dark:bg-zinc-800 rounded-full h-2.5 overflow-hidden mb-3 flex justify-end">
+                <div class="w-full bg-gray-200 dark:bg-zinc-800 rounded-full h-2.5 overflow-hidden mb-3">
                     <div id="expiry-progress" class="bg-purple-600 h-2.5 rounded-full transition-all duration-1000" style="width: 0%"></div>
                 </div>
                 <div class="flex justify-between text-xs text-gray-500 dark:text-zinc-400 font-medium">
@@ -3186,10 +3633,6 @@ body { width: 35em; margin: 0 auto; font-family: Tahoma, Verdana, Arial, sans-se
                 <button onclick="copyTextSub()" class="w-full flex justify-between items-center px-4 py-3 bg-white dark:bg-amoled-card border border-gray-200 dark:border-amoled-border hover:border-indigo-500 dark:hover:border-indigo-500 rounded-xl text-xs font-medium transition shadow-sm">
                     <span class="flex items-center gap-2">⛓️ کپی لینک ساب‌اسکریپشن متنی</span>
                     <span class="text-indigo-500">کپی</span>
-                </button>
-                <button onclick="showQR()" class="w-full flex justify-between items-center px-4 py-3 bg-white dark:bg-amoled-card border border-gray-200 dark:border-amoled-border hover:border-emerald-500 dark:hover:border-emerald-500 rounded-xl text-xs font-medium transition shadow-sm">
-                    <span class="flex items-center gap-2">📱 نمایش کد QR کانفیگ VLESS</span>
-                    <span class="text-emerald-500">مشاهده</span>
                 </button>
             </div>
         </div>
@@ -3227,11 +3670,13 @@ body { width: 35em; margin: 0 auto; font-family: Tahoma, Verdana, Arial, sans-se
                 modal.classList.add('opacity-100', 'pointer-events-auto');
                 card.classList.remove('opacity-0', 'scale-95');
                 card.classList.add('opacity-100', 'scale-100');
+                document.body.style.overflow = 'hidden';
             } else {
                 modal.classList.remove('opacity-100', 'pointer-events-auto');
                 modal.classList.add('opacity-0', 'pointer-events-none');
                 card.classList.remove('opacity-100', 'scale-100');
                 card.classList.add('opacity-0', 'scale-95');
+                document.body.style.overflow = '';
             }
         }
 
