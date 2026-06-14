@@ -839,10 +839,10 @@ async function handleVLESS(env, storedData = null, ctx = null, request = null) {
                 activeIps = JSON.parse(user.active_ips || '{}');
               } catch (e) {}
               
-              // Clean up expired (no activity for 3 minutes)
+              // Clean up expired (no activity for 90 seconds)
               const nowTime = Date.now();
               for (const [ip, lastSeen] of Object.entries(activeIps)) {
-                if (nowTime - lastSeen > 180000) {
+                if (nowTime - lastSeen > 90000) {
                   delete activeIps[ip];
                 }
               }
@@ -1004,10 +1004,10 @@ async function handleVLESS(env, storedData = null, ctx = null, request = null) {
           activeIps = JSON.parse(user.active_ips || '{}');
         } catch (e) {}
         
-        // Clean up expired IPs (no activity for 3 minutes)
+        // Clean up expired IPs (no activity for 90 seconds)
         const now = Date.now();
         for (const [ip, lastSeen] of Object.entries(activeIps)) {
-          if (now - lastSeen > 180000) {
+          if (now - lastSeen > 90000) {
             delete activeIps[ip];
           }
         }
@@ -1015,9 +1015,9 @@ async function handleVLESS(env, storedData = null, ctx = null, request = null) {
         if (!activeIps[clientIP]) {
           const sortedIps = Object.keys(activeIps).sort((a, b) => activeIps[b] - activeIps[a]);
           if (sortedIps.length >= user.ip_limit) {
-            // Evict oldest active IP to make room for this new connection
-            const oldestIp = sortedIps[sortedIps.length - 1];
-            delete activeIps[oldestIp];
+            // Block new connection if limit reached (Strict security)
+            serverSock.close();
+            return;
           }
         }
         
