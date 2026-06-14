@@ -763,7 +763,14 @@ async function handleVLESS(env, storedData = null, ctx = null, request = null) {
           if (user && user.active_ips) {
             let activeIps = JSON.parse(user.active_ips || '{}');
             if (activeIps[clientIP]) {
-              delete activeIps[clientIP];
+              if (typeof activeIps[clientIP] === 'object') {
+                activeIps[clientIP].count = (activeIps[clientIP].count || 1) - 1;
+                if (activeIps[clientIP].count <= 0) {
+                  delete activeIps[clientIP];
+                }
+              } else {
+                delete activeIps[clientIP];
+              }
               await env.DB.prepare("UPDATE users SET active_ips = ? WHERE uuid = ?")
                 .bind(JSON.stringify(activeIps), validUUID).run();
             }
@@ -841,14 +848,19 @@ async function handleVLESS(env, storedData = null, ctx = null, request = null) {
               
               // Clean up expired (no activity for 90 seconds)
               const nowTime = Date.now();
-              for (const [ip, lastSeen] of Object.entries(activeIps)) {
+              for (const [ip, data] of Object.entries(activeIps)) {
+                const lastSeen = (data && typeof data === 'object') ? data.timestamp : data;
                 if (nowTime - lastSeen > 90000) {
                   delete activeIps[ip];
                 }
               }
               
               // Sort active IPs by last seen timestamp descending (newest first)
-              const sortedIps = Object.keys(activeIps).sort((a, b) => activeIps[b] - activeIps[a]);
+              const sortedIps = Object.keys(activeIps).sort((a, b) => {
+                const tA = (activeIps[a] && typeof activeIps[a] === 'object') ? activeIps[a].timestamp : activeIps[a];
+                const tB = (activeIps[b] && typeof activeIps[b] === 'object') ? activeIps[b].timestamp : activeIps[b];
+                return tB - tA;
+              });
               
               // Find the index of the current client IP in the sorted list
               const clientIpIndex = sortedIps.indexOf(clientIP);
@@ -857,13 +869,17 @@ async function handleVLESS(env, storedData = null, ctx = null, request = null) {
                 if (sortedIps.length >= user.ip_limit) {
                   isIpLimitExpired = true;
                 } else {
-                  activeIps[clientIP] = nowTime;
+                  activeIps[clientIP] = { timestamp: nowTime, count: 1 };
                   updatedActiveIps = JSON.stringify(activeIps);
                 }
               } else if (clientIpIndex >= user.ip_limit) {
                 isIpLimitExpired = true;
               } else {
-                activeIps[clientIP] = nowTime;
+                if (typeof activeIps[clientIP] === 'object') {
+                  activeIps[clientIP].timestamp = nowTime;
+                } else {
+                  activeIps[clientIP] = { timestamp: nowTime, count: 1 };
+                }
                 updatedActiveIps = JSON.stringify(activeIps);
               }
             }
@@ -1006,22 +1022,34 @@ async function handleVLESS(env, storedData = null, ctx = null, request = null) {
         
         // Clean up expired IPs (no activity for 90 seconds)
         const now = Date.now();
-        for (const [ip, lastSeen] of Object.entries(activeIps)) {
+        for (const [ip, data] of Object.entries(activeIps)) {
+          const lastSeen = (data && typeof data === 'object') ? data.timestamp : data;
           if (now - lastSeen > 90000) {
             delete activeIps[ip];
           }
         }
         
         if (!activeIps[clientIP]) {
-          const sortedIps = Object.keys(activeIps).sort((a, b) => activeIps[b] - activeIps[a]);
+          const sortedIps = Object.keys(activeIps).sort((a, b) => {
+            const tA = (activeIps[a] && typeof activeIps[a] === 'object') ? activeIps[a].timestamp : activeIps[a];
+            const tB = (activeIps[b] && typeof activeIps[b] === 'object') ? activeIps[b].timestamp : activeIps[b];
+            return tB - tA;
+          });
           if (sortedIps.length >= user.ip_limit) {
             // Block new connection if limit reached (Strict security)
             serverSock.close();
             return;
           }
+          activeIps[clientIP] = { timestamp: now, count: 1 };
+        } else {
+          if (typeof activeIps[clientIP] === 'object') {
+            activeIps[clientIP].timestamp = now;
+            activeIps[clientIP].count = (activeIps[clientIP].count || 0) + 1;
+          } else {
+            activeIps[clientIP] = { timestamp: now, count: 1 };
+          }
         }
         
-        activeIps[clientIP] = now;
         try {
           await env.DB.prepare("UPDATE users SET active_ips = ?, last_active = ? WHERE uuid = ?")
             .bind(JSON.stringify(activeIps), now, reqUUID).run();
