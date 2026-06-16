@@ -72,7 +72,7 @@ const Router = {
   },
 
   isSubscriptionPath(pathname) {
-    return pathname.startsWith('/sub/') || pathname.startsWith('/feed/');
+    return pathname.startsWith('/sub/') || pathname.startsWith('/json/');
   },
 
   async handleWebSocket(request, env, ctx) {
@@ -93,15 +93,10 @@ const Router = {
   },
 
   async handleSubscription(url, env) {
-    const isSubPath = url.pathname.startsWith('/sub/');
-    const offset = isSubPath ? 5 : 6;
+    const isJson = url.pathname.startsWith('/json/');
+    const offset = isJson ? 6 : 5;
     let subUser = decodeURIComponent(url.pathname.slice(offset));
     const host = url.hostname;
-
-    const isJson = !isSubPath && subUser.startsWith('json/');
-    if (isJson) {
-      subUser = subUser.slice(5);
-    }
 
     try {
       const user = await env.DB.prepare("SELECT * FROM users WHERE username = ? OR uuid = ?").bind(subUser, subUser).first();
@@ -285,11 +280,13 @@ const Router = {
     // API: تنظیمات آی‌پی پروکسی (GET & POST)
     if (url.pathname === '/api/proxy-ip') {
       if (request.method === 'POST') {
-        const { proxy_ip, iata, frag_len, frag_int, fragments_list, custom_proxy_ip } = await request.json();
+        const { proxy_ip, iata, frag_len, frag_int, frag_max_split, frag_max_split_enabled, fragments_list, custom_proxy_ip } = await request.json();
         if (proxy_ip) await env.DB.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES ('proxy_ip', ?)").bind(proxy_ip).run();
         if (iata !== undefined) await env.DB.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES ('proxy_location_iata', ?)").bind(iata).run();
         if (frag_len !== undefined) await env.DB.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES ('frag_len', ?)").bind(frag_len).run();
         if (frag_int !== undefined) await env.DB.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES ('frag_int', ?)").bind(frag_int).run();
+        if (frag_max_split !== undefined) await env.DB.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES ('frag_max_split', ?)").bind(frag_max_split).run();
+        if (frag_max_split_enabled !== undefined) await env.DB.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES ('frag_max_split_enabled', ?)").bind(String(frag_max_split_enabled)).run();
         if (fragments_list !== undefined) {
           const listStr = typeof fragments_list === 'string' ? fragments_list : JSON.stringify(fragments_list);
           await env.DB.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES ('fragments_list', ?)").bind(listStr).run();
@@ -305,6 +302,8 @@ const Router = {
         const rowIata = await env.DB.prepare("SELECT value FROM settings WHERE key = 'proxy_location_iata'").first();
         const rowLen = await env.DB.prepare("SELECT value FROM settings WHERE key = 'frag_len'").first();
         const rowInt = await env.DB.prepare("SELECT value FROM settings WHERE key = 'frag_int'").first();
+        const rowMaxSplit = await env.DB.prepare("SELECT value FROM settings WHERE key = 'frag_max_split'").first();
+        const rowMaxSplitEnabled = await env.DB.prepare("SELECT value FROM settings WHERE key = 'frag_max_split_enabled'").first();
         const rowFragList = await env.DB.prepare("SELECT value FROM settings WHERE key = 'fragments_list'").first();
         const rowCustomIp = await env.DB.prepare("SELECT value FROM settings WHERE key = 'custom_proxy_ip'").first();
         
@@ -320,6 +319,8 @@ const Router = {
           iata: rowIata ? rowIata.value : "",
           frag_len: rowLen ? rowLen.value : "10-20",
           frag_int: rowInt ? rowInt.value : "1-2",
+          frag_max_split: rowMaxSplit ? rowMaxSplit.value : "2-6",
+          frag_max_split_enabled: rowMaxSplitEnabled ? (rowMaxSplitEnabled.value === 'true') : true,
           fragments_list: fragmentsList,
           custom_proxy_ip: rowCustomIp ? rowCustomIp.value : ""
         }), { headers: { "Content-Type": "application/json" } });
@@ -342,20 +343,29 @@ const Router = {
             ).bind(username).run();
             return new Response(JSON.stringify({ success: true }), { headers: { "Content-Type": "application/json" } });
           } else {
-            const { limit_gb, expiry_days, ips, tls, port, fingerprint, ip_limit } = body;
-            await env.DB.prepare(
-              "UPDATE users SET limit_gb = ?, expiry_days = ?, ips = ?, tls = ?, port = ?, fingerprint = ?, ip_limit = ? WHERE username = ?"
-            ).bind(
-              limit_gb ? parseFloat(limit_gb) : null, 
-              expiry_days ? parseInt(expiry_days) : null, 
-              ips || null, 
-              tls, 
-              port, 
-              fingerprint || 'chrome',
-              ip_limit ? parseInt(ip_limit) : null,
-              username
-            ).run();
-            return new Response(JSON.stringify({ success: true }), { headers: { "Content-Type": "application/json" } });
+            const { username: newUsername, limit_gb, expiry_days, ips, tls, port, fingerprint, ip_limit } = body;
+            try {
+              await env.DB.prepare(
+                "UPDATE users SET username = ?, limit_gb = ?, expiry_days = ?, ips = ?, tls = ?, port = ?, fingerprint = ?, ip_limit = ? WHERE username = ?"
+              ).bind(
+                newUsername || username,
+                limit_gb ? parseFloat(limit_gb) : null, 
+                expiry_days ? parseInt(expiry_days) : null, 
+                ips || null, 
+                tls, 
+                port, 
+                fingerprint || 'chrome',
+                ip_limit ? parseInt(ip_limit) : null,
+                username
+              ).run();
+              return new Response(JSON.stringify({ success: true }), { headers: { "Content-Type": "application/json" } });
+            } catch (err) {
+              let errorMsg = err.message;
+              if (errorMsg.includes("UNIQUE constraint failed")) {
+                errorMsg = "این نام کاربری از قبل وجود دارد.";
+              }
+              return new Response(JSON.stringify({ error: errorMsg }), { status: 500, headers: { "Content-Type": "application/json" } });
+            }
           }
         }
 
@@ -512,6 +522,17 @@ const SubscriptionService = {
       }
     } catch(e) {}
 
+    let fragMaxSplit = "2-6";
+    let fragMaxSplitEnabled = true;
+    try {
+      const rowMaxSplit = await env.DB.prepare("SELECT value FROM settings WHERE key = 'frag_max_split'").first();
+      if (rowMaxSplit && rowMaxSplit.value) fragMaxSplit = rowMaxSplit.value;
+      const rowMaxSplitEnabled = await env.DB.prepare("SELECT value FROM settings WHERE key = 'frag_max_split_enabled'").first();
+      if (rowMaxSplitEnabled && rowMaxSplitEnabled.value !== undefined) {
+        fragMaxSplitEnabled = rowMaxSplitEnabled.value === 'true';
+      }
+    } catch(e) {}
+
     if (!Array.isArray(fragments) || fragments.length === 0) {
       let fragLen = "10-20";
       let fragInt = "1-2";
@@ -584,7 +605,13 @@ const SubscriptionService = {
               {
                 protocol: "freedom",
                 settings: {
-                  fragment: { packets: "tlshello", length: frag.length || frag.len || "10-20", interval: frag.interval || frag.int || "1-2" }
+                  fragment: (() => {
+                    const fConfig = { packets: "tlshello", length: frag.length || frag.len || "10-20", interval: frag.interval || frag.int || "1-2" };
+                    if (fragMaxSplitEnabled) {
+                      fConfig.maxSplit = fragMaxSplit;
+                    }
+                    return fConfig;
+                  })()
                 },
                 ["stream" + "Settings"]: {
                   sockopt: {
@@ -710,6 +737,7 @@ async function handleVLESS(env, storedData = null, ctx = null, request = null) {
   let username = null;
   let tickCount = 0;
   let validUUID = null;
+  let userIpLimit = null;
 
   function addBytes(bytes) {
     if (bytes <= 0 || !username) return;
@@ -756,7 +784,7 @@ async function handleVLESS(env, storedData = null, ctx = null, request = null) {
     const uname = username;
     if (!uname) return;
 
-    if (clientIP && clientIP !== "unknown" && validUUID) {
+    if (clientIP && clientIP !== "unknown" && validUUID && userIpLimit && userIpLimit > 0) {
       const removeIpTask = async () => {
         try {
           const user = await env.DB.prepare("SELECT active_ips FROM users WHERE uuid = ?").bind(validUUID).first();
@@ -821,6 +849,9 @@ async function handleVLESS(env, storedData = null, ctx = null, request = null) {
         if (tickCount >= 4) {
           tickCount = 0;
           const user = await env.DB.prepare("SELECT is_active, limit_gb, used_gb, expiry_days, created_at, ip_limit, active_ips FROM users WHERE uuid = ?").bind(validUUID).first();
+          if (user) {
+            userIpLimit = user.ip_limit;
+          }
           
           let isExpired = false;
           let isIpLimitExpired = false;
@@ -995,6 +1026,8 @@ async function handleVLESS(env, storedData = null, ctx = null, request = null) {
         serverSock.close();
         return;
       }
+
+      userIpLimit = user.ip_limit;
 
       if (user.limit_gb && user.used_gb >= user.limit_gb) {
         serverSock.close();
@@ -2040,9 +2073,9 @@ body { width: 35em; margin: 0 auto; font-family: Tahoma, Verdana, Arial, sans-se
             <div class="flex items-center gap-3">
                 <h1 class="text-base md:text-lg font-bold flex items-center gap-2" dir="ltr">
                     <span>Zeus Panel</span>
-                    <span class="text-[10px] md:text-xs px-2 py-0.5 font-semibold bg-blue-100 text-blue-800 dark:bg-blue-900/30 dark:text-blue-400 rounded-full">v1.2</span>
+                    <span class="text-[10px] md:text-xs px-2 py-0.5 font-semibold bg-blue-100 text-blue-800 dark:bg-blue-900/30 dark:text-blue-400 rounded-full">v1.3</span>
                 </h1>
-                <div class="hidden sm:flex items-center gap-3 bg-gray-100/80 dark:bg-zinc-800/40 px-3 py-1 rounded-full border border-gray-200/55 dark:border-zinc-800/50 shadow-sm flex-shrink-0">
+                <div class="flex items-center gap-2 sm:gap-3 bg-gray-100/80 dark:bg-zinc-800/40 px-2.5 py-1 rounded-full border border-gray-200/55 dark:border-zinc-800/50 shadow-sm flex-shrink-0">
                     <a href="https://github.com/AG-Morgan/Zeus-Panel" target="_blank" rel="noopener noreferrer" class="text-gray-700 dark:text-zinc-300 hover:text-black dark:hover:text-white transition-all transform hover:scale-125 duration-200 flex-shrink-0" title="گیت‌هاب">
                         <svg class="w-[18px] h-[18px] flex-shrink-0" viewBox="0 0 24 24" fill="currentColor">
                             <path fill-rule="evenodd" clip-rule="evenodd" d="M12 2C6.477 2 2 6.477 2 12c0 4.42 2.87 8.17 6.84 9.5.5.08.66-.23.66-.5v-1.69c-2.77.6-3.36-1.34-3.36-1.34-.46-1.16-1.11-1.47-1.11-1.47-.91-.62.07-.6.07-.6 1 .07 1.53 1.03 1.53 1.03.87 1.52 2.34 1.07 2.91.83.09-.65.35-1.09.63-1.34-2.22-.25-4.55-1.11-4.55-4.92 0-1.11.38-2 1.03-2.71-.1-.25-.45-1.29.1-2.64 0 0 .84-.27 2.75 1.02.79-.22 1.65-.33 2.5-.33.85 0 1.71.11 2.5.33 1.91-1.29 2.75-1.02 2.75-1.02.55 1.35.2 2.39.1 2.64.65.71 1.03 1.6 1.03 2.71 0 3.82-2.34 4.66-4.57 4.91.36.31.69.92.69 1.85V21c0 .27.16.59.67.5C19.14 20.16 22 16.42 22 12A10 10 0 0012 2z"/>
@@ -2062,10 +2095,7 @@ body { width: 35em; margin: 0 auto; font-family: Tahoma, Verdana, Arial, sans-se
                     <svg id="moon-icon" class="w-5 h-5 block dark:hidden text-gray-600" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M20.354 15.354A9 9 0 018.646 3.646 9.003 9.003 0 0012 21a9.003 9.003 0 008.354-5.646z"></path></svg>
                 </button>
                 <button onclick="toggleSettingsModal(true)" class="p-2 md:p-2.5 rounded-full bg-gray-100 dark:bg-zinc-900/60 border border-gray-200/50 dark:border-zinc-800/50 hover:bg-gray-200 dark:hover:bg-zinc-800 transition text-gray-600 dark:text-gray-300 shadow-sm" title="تنظیمات">
-                    <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z"></path><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"></path></svg>
-                </button>
-                <button onclick="logoutAdmin()" class="p-2 md:p-2.5 rounded-full bg-gray-100 dark:bg-zinc-900/60 border border-gray-200/50 dark:border-zinc-800/50 hover:bg-red-50 dark:hover:bg-red-950/20 transition text-red-600 dark:text-red-400 shadow-sm" title="خروج از حساب">
-                    <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M17 16l4-4m0 0l-4-4m4 4H7m6 4v1a3 3 0 01-3 3H6a3 3 0 01-3-3V7a3 3 0 013-3h4a3 3 0 013 3v1"></path></svg>
+                    <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31(2.37-2.37.996.608 2.296.07 2.572-1.065z"></path><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"></path></svg>
                 </button>
                 <button onclick="openCreateModal()" class="flex items-center justify-center p-2 md:p-2.5 bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-700 hover:to-indigo-700 text-white rounded-full shadow-md hover:shadow-lg hover:scale-105 transition-all duration-300" title="کاربر جدید">
                     <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M12 4v16m8-8H4"></path></svg>
@@ -2147,24 +2177,34 @@ body { width: 35em; margin: 0 auto; font-family: Tahoma, Verdana, Arial, sans-se
                 </div>
             </div>
             <!-- Filters & Sorting -->
-            <div class="flex flex-wrap items-center gap-3 w-full md:w-auto">
+            <div class="grid grid-cols-2 gap-3 w-full md:flex md:w-auto">
                 <!-- Status Filter -->
-                <select id="filter-status" onchange="filterAndRenderUsers()" class="px-3 py-2.5 bg-gray-50 dark:bg-amoled-input border border-gray-300 dark:border-amoled-border rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 text-gray-700 dark:text-zinc-300 cursor-pointer">
-                    <option value="all">🔍 همه وضعیت‌ها</option>
-                    <option value="active">✅ فعال</option>
-                    <option value="inactive">❌ غیرفعال</option>
-                    <option value="online">⚡ آنلاین</option>
-                    <option value="offline">💤 آفلاین</option>
-                    <option value="expired">⏳ منقضی شده / تمام شده</option>
-                </select>
+                <div class="relative w-full md:w-48">
+                    <select id="filter-status" onchange="filterAndRenderUsers()" class="w-full pl-8 pr-3 py-2.5 bg-gray-50 dark:bg-amoled-input border border-gray-300 dark:border-amoled-border rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 text-gray-700 dark:text-zinc-300 cursor-pointer appearance-none">
+                        <option value="all">🔍 همه وضعیت‌ها</option>
+                        <option value="active">✅ فعال</option>
+                        <option value="inactive">❌ غیرفعال</option>
+                        <option value="online">⚡ آنلاین</option>
+                        <option value="offline">💤 آفلاین</option>
+                        <option value="expired">⏳ منقضی شده / تمام شده</option>
+                    </select>
+                    <div class="pointer-events-none absolute inset-y-0 left-0 flex items-center pl-3 text-gray-500 dark:text-zinc-400">
+                        <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"></path></svg>
+                    </div>
+                </div>
                 <!-- Sorting -->
-                <select id="sort-users" onchange="filterAndRenderUsers()" class="px-3 py-2.5 bg-gray-50 dark:bg-amoled-input border border-gray-300 dark:border-amoled-border rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 text-gray-700 dark:text-zinc-300 cursor-pointer">
-                    <option value="newest">📅 جدیدترین</option>
-                    <option value="name">🔤 نام کاربری (الفبا)</option>
-                    <option value="usage-desc">📊 بیشترین مصرف</option>
-                    <option value="usage-asc">📈 کمترین مصرف</option>
-                    <option value="expiry-asc">⏳ کمترین زمان باقی‌مانده</option>
-                </select>
+                <div class="relative w-full md:w-48">
+                    <select id="sort-users" onchange="filterAndRenderUsers()" class="w-full pl-8 pr-3 py-2.5 bg-gray-50 dark:bg-amoled-input border border-gray-300 dark:border-amoled-border rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 text-gray-700 dark:text-zinc-300 cursor-pointer appearance-none">
+                        <option value="newest">📅 جدیدترین</option>
+                        <option value="name">🔤 نام کاربری (الفبا)</option>
+                        <option value="usage-desc">📊 بیشترین مصرف</option>
+                        <option value="usage-asc">📈 کمترین مصرف</option>
+                        <option value="expiry-asc">⏳ کمترین زمان باقی‌مانده</option>
+                    </select>
+                    <div class="pointer-events-none absolute inset-y-0 left-0 flex items-center pl-3 text-gray-500 dark:text-zinc-400">
+                        <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"></path></svg>
+                    </div>
+                </div>
             </div>
         </div>
 
@@ -2322,9 +2362,14 @@ body { width: 35em; margin: 0 auto; font-family: Tahoma, Verdana, Arial, sans-se
         <div class="w-full max-w-md bg-white dark:bg-amoled-card border border-gray-200 dark:border-amoled-border rounded-2xl shadow-xl overflow-hidden transition-all transform duration-300 opacity-0 scale-95 ease-out">
             <div class="px-6 py-4 border-b border-gray-150 dark:border-amoled-border flex justify-between items-center bg-gray-50 dark:bg-zinc-900/50">
                 <h3 class="font-bold text-gray-900 dark:text-zinc-100">تنظیمات پنل</h3>
-                <button onclick="toggleSettingsModal(false)" class="text-gray-400 hover:text-gray-600 dark:hover:text-zinc-200">
-                    <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"></path></svg>
-                </button>
+                <div class="flex items-center gap-1.5">
+                    <button onclick="logoutAdmin()" class="p-1 rounded-lg hover:bg-red-50 dark:hover:bg-red-950/20 text-red-600 dark:text-red-400 transition" title="خروج از حساب">
+                        <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M17 16l4-4m0 0l-4-4m4 4H7m6 4v1a3 3 0 01-3 3H6a3 3 0 01-3-3V7a3 3 0 013-3h4a3 3 0 013 3v1"></path></svg>
+                    </button>
+                    <button onclick="toggleSettingsModal(false)" class="text-gray-400 hover:text-gray-600 dark:hover:text-zinc-200 p-1 rounded-lg hover:bg-gray-100 dark:hover:bg-zinc-800 transition">
+                        <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"></path></svg>
+                    </button>
+                </div>
             </div>
             
             <!-- Modern Tab switcher -->
@@ -2357,6 +2402,25 @@ body { width: 35em; margin: 0 auto; font-family: Tahoma, Verdana, Arial, sans-se
                         <label class="block text-sm font-medium mb-1.5 text-gray-700 dark:text-zinc-300">Proxy Ip</label>
                         <input type="text" id="custom-proxy-ip" class="w-full px-3 py-2.5 bg-white dark:bg-amoled-input border border-gray-300 dark:border-amoled-border rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 text-gray-700 dark:text-zinc-200 font-mono" placeholder="مثال: 1.2.3.4 یا clean.domain.com" dir="ltr">
                         <p class="text-[10px] text-gray-500 dark:text-zinc-400 mt-1">اولویت بالاتر نسبت به لوکیشن‌های فوق</p>
+                    </div>
+                    <div class="pt-2 border-t border-gray-150 dark:border-zinc-800">
+                        <div class="flex justify-between items-center mb-1.5">
+                            <label class="block text-sm font-medium text-gray-700 dark:text-zinc-300">Max Split</label>
+                            <label class="relative inline-flex items-center cursor-pointer scale-90 origin-right">
+                                <input type="checkbox" id="custom-frag-max-split-enabled" onchange="document.getElementById(&#39;custom-frag-max-split-min&#39;).disabled = !this.checked; document.getElementById(&#39;custom-frag-max-split-max&#39;).disabled = !this.checked;" class="sr-only peer" checked>
+                                <div class="w-9 h-5 bg-gray-300 dark:bg-zinc-700 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[&quot;&quot;] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-4 after:w-4 after:transition-all dark:border-zinc-600 peer-checked:bg-blue-600"></div>
+                            </label>
+                        </div>
+                        <div class="flex gap-2">
+                            <div class="flex-1">
+                                <label class="block text-[10px] text-gray-500 dark:text-zinc-400 mb-0.5">حداکثر (Max)</label>
+                                <input type="number" min="1" id="custom-frag-max-split-max" class="w-full px-3 py-2 bg-white dark:bg-amoled-input border border-gray-300 dark:border-amoled-border rounded-lg text-sm text-center font-mono focus:outline-none focus:ring-2 focus:ring-blue-500 text-gray-700 dark:text-zinc-200" placeholder="6" value="6">
+                            </div>
+                            <div class="flex-1">
+                                <label class="block text-[10px] text-gray-500 dark:text-zinc-400 mb-0.5">حداقل (Min)</label>
+                                <input type="number" min="1" id="custom-frag-max-split-min" class="w-full px-3 py-2 bg-white dark:bg-amoled-input border border-gray-300 dark:border-amoled-border rounded-lg text-sm text-center font-mono focus:outline-none focus:ring-2 focus:ring-blue-500 text-gray-700 dark:text-zinc-200" placeholder="2" value="2">
+                            </div>
+                        </div>
                     </div>
                     <div class="pt-2 border-t border-gray-150 dark:border-zinc-800">
                         <div class="flex justify-between items-center mb-2">
@@ -2470,6 +2534,8 @@ body { width: 35em; margin: 0 auto; font-family: Tahoma, Verdana, Arial, sans-se
     <script>
         window.globalFragLen = "10-20";
         window.globalFragInt = "1-2";
+        window.globalFragMaxSplit = "2-6";
+        window.globalFragMaxSplitEnabled = true;
         window.globalFragmentsList = [{ length: "10-20", interval: "1-2" }];
         window.globalCustomProxyIp = "";
 
@@ -2504,8 +2570,8 @@ body { width: 35em; margin: 0 auto; font-family: Tahoma, Verdana, Arial, sans-se
                 
                 document.getElementById('links-modal-username').innerText = username;
                 
-                const subLink = getSubLink(username);
-                const jsonSubLink = getJsonSubLink(username);
+                const subLink = getSubLink(uuid);
+                const jsonSubLink = getJsonSubLink(uuid);
                 const statusLink = getStatusLink(uuid);
                 
                 document.getElementById('sub-link-val').value = subLink;
@@ -2529,14 +2595,14 @@ body { width: 35em; margin: 0 auto; font-family: Tahoma, Verdana, Arial, sans-se
         }
 
         function copySubLinkFromModal() {
-            if (activeLinkUsername) {
-                copySubLink(encodeURIComponent(activeLinkUsername));
+            if (activeLinkUuid) {
+                copySubLink(encodeURIComponent(activeLinkUuid));
             }
         }
 
         function copyJsonSubLinkFromModal() {
-            if (activeLinkUsername) {
-                copyJsonSubLink(encodeURIComponent(activeLinkUsername));
+            if (activeLinkUuid) {
+                copyJsonSubLink(encodeURIComponent(activeLinkUuid));
             }
         }
 
@@ -2547,8 +2613,8 @@ body { width: 35em; margin: 0 auto; font-family: Tahoma, Verdana, Arial, sans-se
         }
 
         function showQRFromModal(type) {
-            if (activeLinkUsername) {
-                showSubQR(encodeURIComponent(activeLinkUsername), type);
+            if (activeLinkUuid) {
+                showSubQR(encodeURIComponent(activeLinkUuid), type);
             }
         }
 
@@ -2641,6 +2707,29 @@ body { width: 35em; margin: 0 auto; font-family: Tahoma, Verdana, Arial, sans-se
                     customIpInput.value = window.globalCustomProxyIp || '';
                 }
 
+                const maxSplitMinInput = document.getElementById('custom-frag-max-split-min');
+                const maxSplitMaxInput = document.getElementById('custom-frag-max-split-max');
+                const maxSplitEnabledInput = document.getElementById('custom-frag-max-split-enabled');
+                
+                let splitMin = "2";
+                let splitMax = "6";
+                if (window.globalFragMaxSplit && window.globalFragMaxSplit.includes('-')) {
+                    const parts = window.globalFragMaxSplit.split('-');
+                    splitMin = parts[0] || "2";
+                    splitMax = parts[1] || "6";
+                } else if (window.globalFragMaxSplit) {
+                    splitMin = window.globalFragMaxSplit;
+                    splitMax = window.globalFragMaxSplit;
+                }
+
+                if (maxSplitMinInput) maxSplitMinInput.value = splitMin;
+                if (maxSplitMaxInput) maxSplitMaxInput.value = splitMax;
+                if (maxSplitEnabledInput) {
+                    maxSplitEnabledInput.checked = window.globalFragMaxSplitEnabled;
+                    if (maxSplitMinInput) maxSplitMinInput.disabled = !window.globalFragMaxSplitEnabled;
+                    if (maxSplitMaxInput) maxSplitMaxInput.disabled = !window.globalFragMaxSplitEnabled;
+                }
+
                 const cachedLocations = localStorage.getItem('cached_locations_list');
                 const cachedActiveIata = localStorage.getItem('cached_active_iata') || '';
                 if (cachedLocations) {
@@ -2660,6 +2749,17 @@ body { width: 35em; margin: 0 auto; font-family: Tahoma, Verdana, Arial, sans-se
                 card.classList.add('opacity-0', 'scale-95');
             }
             updateScrollLock();
+        }
+
+        function validateFragValue(val) {
+            if (!val) return false;
+            const parts = val.split('-');
+            if (parts.length > 2) return false;
+            for (let i = 0; i < parts.length; i++) {
+                const num = parseInt(parts[i].trim(), 10);
+                if (isNaN(num) || num < 1) return false;
+            }
+            return true;
         }
 
         function addNewFragmentRow(lengthVal = '', intervalVal = '') {
@@ -2970,7 +3070,7 @@ body { width: 35em; margin: 0 auto; font-family: Tahoma, Verdana, Arial, sans-se
                                         '<span class="font-bold text-gray-900 dark:text-zinc-100">' + user.username + '</span>' +
                                         (user.is_active === 0 ? '<span class="px-1.5 py-0.5 text-[10px] font-medium bg-red-100 text-red-800 dark:bg-red-900/30 dark:text-red-400 rounded-md">قطع</span>' : '<span class="px-1.5 py-0.5 text-[10px] font-medium bg-green-100 text-green-800 dark:bg-green-900/30 dark:text-green-400 rounded-md">فعال</span>') +
                                         (user.is_online === 1 ? '<span class="px-1.5 py-0.5 text-[10px] font-medium bg-emerald-500 text-white rounded-md animate-pulse">● آنلاین</span>' : '<span class="px-1.5 py-0.5 text-[10px] font-medium bg-gray-200 text-gray-600 dark:bg-zinc-800 dark:text-zinc-400 rounded-md">آفلاین</span>') +
-                                        (user.ip_limit ? '<span class="px-1.5 py-0.5 text-[10px] font-medium bg-purple-100 text-purple-800 dark:bg-purple-900/30 dark:text-purple-400 rounded-md">محدودیت IP: ' + user.ip_limit + '</span>' : '') +
+                                        (user.ip_limit ? '<span class="px-1.5 py-0.5 text-[10px] font-medium bg-purple-100 text-purple-800 dark:bg-purple-900/30 dark:text-purple-400 rounded-md">IP: ' + user.ip_limit + '</span>' : '') +
                                     '</div>' +
                                     '<div class="flex gap-1.5">' +
                                         '<button onclick="copyConfig(\\'' + encodeURIComponent(user.username) + '\\')" title="کپی کانفیگ" class="p-1.5 bg-white dark:bg-zinc-800 border border-gray-200 dark:border-zinc-700 hover:bg-blue-50 dark:hover:bg-blue-900/30 text-blue-600 dark:text-blue-400 rounded-md transition shadow-sm"><svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z"></path></svg></button>' +
@@ -3136,21 +3236,21 @@ body { width: 35em; margin: 0 auto; font-family: Tahoma, Verdana, Arial, sans-se
             return links.join('\\n');
         }
 
-        function getSubLink(username) {
-            return window.location.origin + '/feed/' + encodeURIComponent(username);
+        function getSubLink(uuid) {
+            return window.location.origin + '/sub/' + encodeURIComponent(uuid);
         }
 
-        function getJsonSubLink(username) {
-            return window.location.origin + '/feed/json/' + encodeURIComponent(username);
+        function getJsonSubLink(uuid) {
+            return window.location.origin + '/json/' + encodeURIComponent(uuid);
         }
 
         function getStatusLink(uuid) {
             return window.location.origin + '/status/' + encodeURIComponent(uuid);
         }
 
-        function copySubLink(encodedUsername) {
-            const username = decodeURIComponent(encodedUsername);
-            navigator.clipboard.writeText(getSubLink(username)).then(() => {
+        function copySubLink(encodedUuid) {
+            const uuid = decodeURIComponent(encodedUuid);
+            navigator.clipboard.writeText(getSubLink(uuid)).then(() => {
                 alert('✅ لینک ساب متنی با موفقیت کپی شد!');
             }).catch(() => {
                 alert('خطا در کپی کردن لینک ساب!');
@@ -3166,21 +3266,21 @@ body { width: 35em; margin: 0 auto; font-family: Tahoma, Verdana, Arial, sans-se
             });
         }
 
-        function copyJsonSubLink(encodedUsername) {
-            const username = decodeURIComponent(encodedUsername);
-            navigator.clipboard.writeText(getJsonSubLink(username)).then(() => {
+        function copyJsonSubLink(encodedUuid) {
+            const uuid = decodeURIComponent(encodedUuid);
+            navigator.clipboard.writeText(getJsonSubLink(uuid)).then(() => {
                 alert('✅ لینک ساب JSON با موفقیت کپی شد!');
             }).catch(() => {
                 alert('خطا در کپی کردن لینک ساب JSON!');
             });
         }
 
-        function showSubQR(encodedUsername, type) {
-            const username = decodeURIComponent(encodedUsername);
+        function showSubQR(encodedUuid, type) {
+            const uuid = decodeURIComponent(encodedUuid);
             if (type === 'normal') {
-                toggleQRModal(true, getSubLink(username), 'QR ساب متنی');
+                toggleQRModal(true, getSubLink(uuid), 'QR ساب متنی');
             } else if (type === 'json') {
-                toggleQRModal(true, getJsonSubLink(username), 'QR ساب JSON');
+                toggleQRModal(true, getJsonSubLink(uuid), 'QR ساب JSON');
             }
         }
 
@@ -3228,6 +3328,15 @@ body { width: 35em; margin: 0 auto; font-family: Tahoma, Verdana, Arial, sans-se
                   if (fragments.length > 1) remarkParts.push('Frag ' + (fragIndex + 1));
                   const remark = remarkParts.join(' - ');
                   
+                  const fragmentConfig = {
+                    "packets": "tlshello",
+                    "length": frag.length || frag.len || window.globalFragLen || "10-20",
+                    "interval": frag.interval || frag.int || window.globalFragInt || "1-2"
+                  };
+                  if (window.globalFragMaxSplitEnabled) {
+                    fragmentConfig.maxSplit = window.globalFragMaxSplit || "2-6";
+                  }
+
                   const jsonConfig = {
                     "remarks": remark,
                     "version": { "min": "25.10.15" },
@@ -3272,11 +3381,7 @@ body { width: 35em; margin: 0 auto; font-family: Tahoma, Verdana, Arial, sans-se
                       {
                         "protocol": "freedom",
                         "settings": {
-                          "fragment": {
-                            "packets": "tlshello",
-                            "length": frag.length || frag.len || window.globalFragLen || "10-20",
-                            "interval": frag.interval || frag.int || window.globalFragInt || "1-2"
-                          }
+                          "fragment": fragmentConfig
                         },
                         "streamSettings": {
                           "sockopt": {
@@ -3345,7 +3450,7 @@ body { width: 35em; margin: 0 auto; font-family: Tahoma, Verdana, Arial, sans-se
 
             const nameInput = document.getElementById('input-name');
             nameInput.value = username;
-            nameInput.disabled = true;
+            nameInput.disabled = false;
 
             document.getElementById('input-limit').value = user.limit_gb || '';
             document.getElementById('input-expiry').value = user.expiry_days || '';
@@ -3444,12 +3549,38 @@ body { width: 35em; margin: 0 auto; font-family: Tahoma, Verdana, Arial, sans-se
                     }
                     if (statusData.frag_len) window.globalFragLen = statusData.frag_len;
                     if (statusData.frag_int) window.globalFragInt = statusData.frag_int;
+                    if (statusData.frag_max_split) window.globalFragMaxSplit = statusData.frag_max_split;
+                    if (statusData.hasOwnProperty('frag_max_split_enabled')) {
+                        window.globalFragMaxSplitEnabled = statusData.frag_max_split_enabled;
+                    }
                     if (statusData.hasOwnProperty('custom_proxy_ip')) {
                         window.globalCustomProxyIp = statusData.custom_proxy_ip || '';
                         const customIpInput = document.getElementById('custom-proxy-ip');
                         if (customIpInput) {
                             customIpInput.value = window.globalCustomProxyIp;
                         }
+                    }
+                    const maxSplitMinInput = document.getElementById('custom-frag-max-split-min');
+                    const maxSplitMaxInput = document.getElementById('custom-frag-max-split-max');
+                    const maxSplitEnabledInput = document.getElementById('custom-frag-max-split-enabled');
+                    
+                    let splitMin = "2";
+                    let splitMax = "6";
+                    if (window.globalFragMaxSplit && window.globalFragMaxSplit.includes('-')) {
+                        const parts = window.globalFragMaxSplit.split('-');
+                        splitMin = parts[0] || "2";
+                        splitMax = parts[1] || "6";
+                    } else if (window.globalFragMaxSplit) {
+                        splitMin = window.globalFragMaxSplit;
+                        splitMax = window.globalFragMaxSplit;
+                    }
+
+                    if (maxSplitMinInput) maxSplitMinInput.value = splitMin;
+                    if (maxSplitMaxInput) maxSplitMaxInput.value = splitMax;
+                    if (maxSplitEnabledInput) {
+                        maxSplitEnabledInput.checked = window.globalFragMaxSplitEnabled;
+                        if (maxSplitMinInput) maxSplitMinInput.disabled = !window.globalFragMaxSplitEnabled;
+                        if (maxSplitMaxInput) maxSplitMaxInput.disabled = !window.globalFragMaxSplitEnabled;
                     }
                 }
 
@@ -3477,15 +3608,44 @@ body { width: 35em; margin: 0 auto; font-family: Tahoma, Verdana, Arial, sans-se
             const customIpInput = document.getElementById('custom-proxy-ip');
             const customIp = customIpInput ? customIpInput.value.trim() : '';
             
+            const maxSplitEnabled = document.getElementById('custom-frag-max-split-enabled').checked;
+            const minVal = parseInt(document.getElementById('custom-frag-max-split-min').value, 10);
+            const maxVal = parseInt(document.getElementById('custom-frag-max-split-max').value, 10);
+
+            if (maxSplitEnabled) {
+                if (isNaN(minVal) || minVal < 1 || isNaN(maxVal) || maxVal < 1) {
+                    alert('⚠️ مقادیر Max Split نامعتبر هستند! هر دو کادر (حداقل و حداکثر) باید عدد بزرگتر یا مساوی 1 باشند.');
+                    return;
+                }
+                if (minVal > maxVal) {
+                    alert('⚠️ مقدار حداقل Max Split نمی‌تواند از مقدار حداکثر بزرگتر باشد!');
+                    return;
+                }
+            }
+            const maxSplitVal = minVal + '-' + maxVal;
+
             const fragments = [];
             const rows = document.querySelectorAll('.frag-config-row');
+            let isFragRowsValid = true;
             rows.forEach(row => {
                 const len = row.querySelector('.frag-row-len').value.trim();
                 const interval = row.querySelector('.frag-row-int').value.trim();
+                if (!validateFragValue(len)) {
+                    alert('⚠️ مقدار Length فرگمنت نامعتبر است! حداقل باید 1 باشد (مثال: 10-20)');
+                    isFragRowsValid = false;
+                    return;
+                }
+                if (!validateFragValue(interval)) {
+                    alert('⚠️ مقدار Interval فرگمنت نامعتبر است! حداقل باید 1 باشد (مثال: 1-2)');
+                    isFragRowsValid = false;
+                    return;
+                }
                 if (len !== "" && interval !== "") {
                     fragments.push({ length: len, interval: interval });
                 }
             });
+
+            if (!isFragRowsValid) return;
 
             if (fragments.length === 0) {
                 alert('⚠️ لطفا فیلدهای تنظیم فرگمنت را پر کنید یا ردیف‌های اضافی را حذف کنید!');
@@ -3494,6 +3654,8 @@ body { width: 35em; margin: 0 auto; font-family: Tahoma, Verdana, Arial, sans-se
 
             const fragLen = fragments[0].length || '10-20';
             const fragInt = fragments[0].interval || '1-2';
+            const fragMaxSplit = maxSplitVal;
+            const fragMaxSplitEnabled = maxSplitEnabled;
             
             btn.disabled = true;
             btn.innerText = 'در حال ذخیره...';
@@ -3527,6 +3689,8 @@ body { width: 35em; margin: 0 auto; font-family: Tahoma, Verdana, Arial, sans-se
                         iata: customIp ? '' : (iata ? iata.toUpperCase() : ''), 
                         frag_len: fragLen, 
                         frag_int: fragInt,
+                        frag_max_split: fragMaxSplit,
+                        frag_max_split_enabled: fragMaxSplitEnabled,
                         fragments_list: fragments,
                         custom_proxy_ip: customIp
                     })
@@ -3535,6 +3699,8 @@ body { width: 35em; margin: 0 auto; font-family: Tahoma, Verdana, Arial, sans-se
                 if (response.ok) {
                     window.globalFragLen = fragLen;
                     window.globalFragInt = fragInt;
+                    window.globalFragMaxSplit = fragMaxSplit;
+                    window.globalFragMaxSplitEnabled = fragMaxSplitEnabled;
                     window.globalFragmentsList = fragments;
                     window.globalCustomProxyIp = customIp;
                     localStorage.setItem('cached_active_iata', customIp ? '' : iata);
@@ -3623,6 +3789,10 @@ body { width: 35em; margin: 0 auto; font-family: Tahoma, Verdana, Arial, sans-se
                             }
                             if (statusData.frag_len) window.globalFragLen = statusData.frag_len;
                             if (statusData.frag_int) window.globalFragInt = statusData.frag_int;
+                            if (statusData.frag_max_split) window.globalFragMaxSplit = statusData.frag_max_split;
+                            if (statusData.hasOwnProperty('frag_max_split_enabled')) {
+                                window.globalFragMaxSplitEnabled = statusData.frag_max_split_enabled;
+                            }
                         }
                     }).catch(() => {});
             }, 30000);
@@ -3776,14 +3946,28 @@ body { width: 35em; margin: 0 auto; font-family: Tahoma, Verdana, Arial, sans-se
                     <span class="flex items-center gap-2">🚀 کپی کانفیگ VLESS (مستقیم)</span>
                     <span class="text-blue-500">کپی</span>
                 </button>
-                <button onclick="copyJsonSub()" class="w-full flex justify-between items-center px-4 py-3 bg-white dark:bg-amoled-card border border-gray-200 dark:border-amoled-border hover:border-purple-500 dark:hover:border-purple-500 rounded-xl text-xs font-medium transition shadow-sm">
-                    <span class="flex items-center gap-2">🌐 کپی لینک ساب‌اسکریپشن JSON (نوین)</span>
-                    <span class="text-purple-500">کپی</span>
+                <button onclick="copyJsonConfigDirect()" class="w-full flex justify-between items-center px-4 py-3 bg-white dark:bg-amoled-card border border-gray-200 dark:border-amoled-border hover:border-teal-500 dark:hover:border-teal-500 rounded-xl text-xs font-medium transition shadow-sm">
+                    <span class="flex items-center gap-2">💻 کپی کانفیگ JSON (مستقیم)</span>
+                    <span class="text-teal-500">کپی</span>
                 </button>
-                <button onclick="copyTextSub()" class="w-full flex justify-between items-center px-4 py-3 bg-white dark:bg-amoled-card border border-gray-200 dark:border-amoled-border hover:border-indigo-500 dark:hover:border-indigo-500 rounded-xl text-xs font-medium transition shadow-sm">
-                    <span class="flex items-center gap-2">⛓️ کپی لینک ساب‌اسکریپشن متنی</span>
-                    <span class="text-indigo-500">کپی</span>
-                </button>
+                <div class="flex gap-2 w-full">
+                    <button onclick="copyJsonSub()" class="flex-1 flex justify-between items-center px-4 py-3 bg-white dark:bg-amoled-card border border-gray-200 dark:border-amoled-border hover:border-purple-500 dark:hover:border-purple-500 rounded-xl text-xs font-medium transition shadow-sm">
+                        <span class="flex items-center gap-2">🌐 کپی لینک ساب‌اسکریپشن JSON</span>
+                        <span class="text-purple-500">کپی</span>
+                    </button>
+                    <button onclick="showQR(&#39;json&#39;)" class="px-4 py-3 bg-white dark:bg-amoled-card border border-gray-200 dark:border-amoled-border hover:border-purple-500 dark:hover:border-purple-500 rounded-xl text-xs font-medium transition shadow-sm text-gray-500 dark:text-zinc-400" title="نمایش کد QR">
+                        <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v1m6 11h2m-6 0h-2v4m0-11v3m0 0h.01M12 12h4.01M16 20h4M4 12h4m12 0h.01M5 8h2a1 1 0 001-1V5a1 1 0 00-1-1H5a1 1 0 00-1 1v2a1 1 0 001 1zm14 0h2a1 1 0 001-1V5a1 1 0 00-1-1h-2a1 1 0 00-1 1v2a1 1 0 001 1zM5 20h2a1 1 0 001-1v-2a1 1 0 00-1-1H5a1 1 0 00-1 1v2a1 1 0 001 1z"></path></svg>
+                    </button>
+                </div>
+                <div class="flex gap-2 w-full">
+                    <button onclick="copyTextSub()" class="flex-1 flex justify-between items-center px-4 py-3 bg-white dark:bg-amoled-card border border-gray-200 dark:border-amoled-border hover:border-indigo-500 dark:hover:border-indigo-500 rounded-xl text-xs font-medium transition shadow-sm">
+                        <span class="flex items-center gap-2">⛓️ کپی لینک ساب‌اسکریپشن VLESS</span>
+                        <span class="text-indigo-500">کپی</span>
+                    </button>
+                    <button onclick="showQR(&#39;text&#39;)" class="px-4 py-3 bg-white dark:bg-amoled-card border border-gray-200 dark:border-amoled-border hover:border-indigo-500 dark:hover:border-indigo-500 rounded-xl text-xs font-medium transition shadow-sm text-gray-500 dark:text-zinc-400" title="نمایش کد QR">
+                        <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v1m6 11h2m-6 0h-2v4m0-11v3m0 0h.01M12 12h4.01M16 20h4M4 12h4m12 0h.01M5 8h2a1 1 0 001-1V5a1 1 0 00-1-1H5a1 1 0 00-1 1v2a1 1 0 001 1zm14 0h2a1 1 0 001-1V5a1 1 0 00-1-1h-2a1 1 0 00-1 1v2a1 1 0 001 1zM5 20h2a1 1 0 001-1v-2a1 1 0 00-1-1H5a1 1 0 00-1 1v2a1 1 0 001 1z"></path></svg>
+                    </button>
+                </div>
             </div>
         </div>
     </div>
@@ -3791,7 +3975,7 @@ body { width: 35em; margin: 0 auto; font-family: Tahoma, Verdana, Arial, sans-se
     <!-- QR Modal -->
     <div id="qr-modal" class="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm opacity-0 pointer-events-none transition-all duration-300 ease-out">
         <div class="w-full max-w-sm bg-white dark:bg-amoled-card border border-gray-200 dark:border-amoled-border rounded-2xl shadow-xl overflow-hidden p-6 text-center transition-all transform duration-300 opacity-0 scale-95 ease-out">
-            <h3 class="font-bold text-gray-900 dark:text-zinc-100 mb-4">اسکن کد QR کانفیگ VLESS</h3>
+            <h3 id="qr-modal-title" class="font-bold text-gray-900 dark:text-zinc-100 mb-4">اسکن کد QR</h3>
             <div class="bg-white p-3 rounded-xl inline-block mb-4 border border-gray-100">
                 <div id="qrcode-box" class="flex justify-center items-center w-48 h-48 mx-auto"></div>
             </div>
@@ -3802,11 +3986,13 @@ body { width: 35em; margin: 0 auto; font-family: Tahoma, Verdana, Arial, sans-se
     <script>
         /* {{USER_DATA_PLACEHOLDER}} */
         
-        function toggleQRModal(show, link = '') {
+        function toggleQRModal(show, link = '', title = 'اسکن کد QR') {
             const modal = document.getElementById('qr-modal');
             const card = modal.querySelector('div');
             const qrBox = document.getElementById('qrcode-box');
+            const titleEl = document.getElementById('qr-modal-title');
             if (show) {
+                if (titleEl) titleEl.innerText = title;
                 qrBox.innerHTML = '';
                 new QRCode(qrBox, {
                     text: link,
@@ -3861,17 +4047,55 @@ body { width: 35em; margin: 0 auto; font-family: Tahoma, Verdana, Arial, sans-se
         }
 
         function copyJsonSub() {
-            const link = window.location.protocol + '//' + getHost() + '/feed/json/' + encodeURIComponent(window.statusUser.username);
+            const link = window.location.protocol + '//' + getHost() + '/json/' + encodeURIComponent(window.statusUser.uuid);
             navigator.clipboard.writeText(link).then(() => alert('✅ لینک ساب JSON کپی شد!'));
         }
 
         function copyTextSub() {
-            const link = window.location.protocol + '//' + getHost() + '/sub/' + encodeURIComponent(window.statusUser.username);
+            const link = window.location.protocol + '//' + getHost() + '/sub/' + encodeURIComponent(window.statusUser.uuid);
             navigator.clipboard.writeText(link).then(() => alert('✅ لینک ساب متنی کپی شد!'));
         }
 
-        function showQR() {
-            toggleQRModal(true, getVlessLink());
+        function showQR(type) {
+            let link = '';
+            let title = '';
+            if (type === 'json') {
+                link = window.location.protocol + '//' + getHost() + '/json/' + encodeURIComponent(window.statusUser.uuid);
+                title = 'اسکن کد QR ساب JSON';
+            } else if (type === 'text') {
+                link = window.location.protocol + '//' + getHost() + '/sub/' + encodeURIComponent(window.statusUser.uuid);
+                title = 'اسکن کد QR ساب متنی';
+            }
+            toggleQRModal(true, link, title);
+        }
+
+        function copyJsonConfigDirect() {
+            const btn = event?.currentTarget || document.activeElement;
+            const originalText = btn ? btn.innerHTML : '';
+            if (btn) {
+                btn.disabled = true;
+                btn.innerHTML = '<span class="flex items-center gap-2">⏳ در حال دریافت...</span>';
+            }
+            const link = window.location.protocol + '//' + getHost() + '/json/' + encodeURIComponent(window.statusUser.uuid);
+            fetch(link)
+                .then(res => {
+                    if (!res.ok) throw new Error();
+                    return res.text();
+                })
+                .then(text => {
+                    navigator.clipboard.writeText(text).then(() => {
+                        alert('✅ کانفیگ JSON مستقیم با موفقیت کپی شد!');
+                    });
+                })
+                .catch(() => {
+                    alert('❌ خطا در دریافت کانفیگ JSON!');
+                })
+                .finally(() => {
+                    if (btn) {
+                        btn.disabled = false;
+                        btn.innerHTML = originalText;
+                    }
+                });
         }
 
         document.addEventListener('DOMContentLoaded', () => {
