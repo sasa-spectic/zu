@@ -1004,14 +1004,11 @@ async function handleVLESS(env, storedData = null, ctx = null, request = null) {
           }
 
           const now = Date.now();
-          const lastRecorded = GLOBAL_LAST_ACTIVE_WRITE.get(username) || 0;
-          if (now - lastRecorded > 60000) {
-            GLOBAL_LAST_ACTIVE_WRITE.set(username, now);
-            if (updatedActiveIps) {
-              await env.DB.prepare("UPDATE users SET last_active = ?, active_ips = ? WHERE username = ?").bind(now, updatedActiveIps, username).run();
-            } else {
-              await env.DB.prepare("UPDATE users SET last_active = ? WHERE username = ?").bind(now, username).run();
-            }
+          GLOBAL_LAST_ACTIVE_WRITE.set(username, now);
+          if (updatedActiveIps) {
+            await env.DB.prepare("UPDATE users SET last_active = ?, active_ips = ? WHERE username = ?").bind(now, updatedActiveIps, username).run();
+          } else {
+            await env.DB.prepare("UPDATE users SET last_active = ? WHERE username = ?").bind(now, username).run();
           }
         }
       } catch (e) {}
