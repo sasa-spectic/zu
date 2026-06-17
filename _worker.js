@@ -606,7 +606,7 @@ const SubscriptionService = {
                 protocol: "freedom",
                 settings: {
                   fragment: (() => {
-                    const fConfig = { packets: "tlshello", length: frag.length || frag.len || "10-20", interval: frag.interval || frag.int || "1-2" };
+                    const fConfig = { packets: isTlsPort ? "tlshello" : "1-3", length: frag.length || frag.len || "10-20", interval: frag.interval || frag.int || "1-2" };
                     if (fragMaxSplitEnabled) {
                       fConfig.maxSplit = fragMaxSplit;
                     }
@@ -653,6 +653,67 @@ const SubscriptionService = {
       });
     });
 
+    const usedGb = user.used_gb || 0;
+    const formattedUsed = usedGb < 1 ? (usedGb * 1024).toFixed(0) + " MB" : usedGb.toFixed(2) + " GB";
+    const limitGb = user.limit_gb;
+    const formattedLimit = limitGb ? (limitGb < 1 ? (limitGb * 1024).toFixed(0) + " MB" : limitGb + " GB") : "Unlimited";
+    let daysRemaining = "Unlimited";
+    if (user.expiry_days && user.created_at) {
+      const created = new Date(user.created_at);
+      const expiryDate = new Date(created.getTime() + (user.expiry_days * 24 * 60 * 60 * 1000));
+      const diffDays = Math.ceil((expiryDate.getTime() - Date.now()) / (1000 * 60 * 60 * 24));
+      daysRemaining = diffDays > 0 ? diffDays + " Days" : "Expired";
+    }
+    const statsRemark = "📊 " + formattedUsed + " / " + formattedLimit + " | ⏳ " + daysRemaining;
+
+    const mockConfig = {
+      remarks: statsRemark,
+      version: { min: "25.10.15" },
+      log: { loglevel: "none" },
+      dns: {
+        servers: [
+          { address: "https://8.8.8.8/dns-query", tag: "remote-dns" },
+          { address: "8.8.8.8", domains: ["full:" + host], skipFallback: true }
+        ],
+        queryStrategy: "UseIP",
+        tag: "dns"
+      },
+      inbounds: [
+        {
+          listen: "127.0.0.1", port: 10808, protocol: "socks",
+          settings: { auth: "noauth", udp: true },
+          sniffing: { destOverride: ["http", "tls"], enabled: true, routeOnly: true },
+          tag: "mixed-in"
+        }
+      ],
+      outbounds: [
+        {
+          protocol: "vle" + "ss",
+          settings: {
+            ["vne" + "xt"]: [{
+              address: host,
+              port: 12345,
+              users: [{ id: user.uuid, encryption: "none" }]
+            }]
+          },
+          ["stream" + "Settings"]: {
+            network: "ws",
+            ["ws" + "Settings"]: { host: host, path: "/" },
+            security: "none"
+          },
+          tag: "proxy"
+        },
+        { protocol: "freedom", settings: { domainStrategy: "UseIP" }, tag: "direct" }
+      ],
+      routing: {
+        domainStrategy: "IPIfNonMatch",
+        rules: [
+          { inboundTag: ["mixed-in"], outboundTag: "proxy", type: "field" }
+        ]
+      }
+    };
+    configArray.unshift(mockConfig);
+
     return new Response(JSON.stringify(configArray, null, 2), {
       headers: { 
         "Content-Type": "text/plain; charset=utf-8",
@@ -683,6 +744,22 @@ const SubscriptionService = {
         links.push(atob('dmxlc3M6Ly8=') + user.uuid + '@' + ip + ':' + portStr + '?path=%2F&security=' + tlsVal + '&encryption=none&insecure=0&host=' + host + '&fp=' + fp + '&type=ws&allowInsecure=0&sni=' + host + '#' + encodeURIComponent(remark));
       });
     });
+
+    const usedGb = user.used_gb || 0;
+    const formattedUsed = usedGb < 1 ? (usedGb * 1024).toFixed(0) + " MB" : usedGb.toFixed(2) + " GB";
+    const limitGb = user.limit_gb;
+    const formattedLimit = limitGb ? (limitGb < 1 ? (limitGb * 1024).toFixed(0) + " MB" : limitGb + " GB") : "Unlimited";
+    let daysRemaining = "Unlimited";
+    if (user.expiry_days && user.created_at) {
+      const created = new Date(user.created_at);
+      const expiryDate = new Date(created.getTime() + (user.expiry_days * 24 * 60 * 60 * 1000));
+      const diffDays = Math.ceil((expiryDate.getTime() - Date.now()) / (1000 * 60 * 60 * 24));
+      daysRemaining = diffDays > 0 ? diffDays + " Days" : "Expired";
+    }
+    const statsRemark = "📊 " + formattedUsed + " / " + formattedLimit + " | ⏳ " + daysRemaining;
+
+    const fakeVlessLink = atob('dmxlc3M6Ly8=') + user.uuid + '@' + host + ':12345?path=%2F&security=none&encryption=none&insecure=0&host=' + host + '&type=ws&allowInsecure=0#' + encodeURIComponent(statsRemark);
+    links.unshift(fakeVlessLink);
 
     const noise = [
       "# System Update Feed: OK",
@@ -720,8 +797,7 @@ async function flushExpiredTraffic(env) {
       try {
         await env.DB.prepare("UPDATE users SET used_gb = used_gb + ? WHERE username = ?").bind(deltaGb, uname).run();
       } catch (e) {
-        let recovered = GLOBAL_TRAFFIC_CACHE.get(uname) || 0;
-        GLOBAL_TRAFFIC_CACHE.set(uname, recovered + cachedBytes);
+        console.error("DB Flush Error:", e.message);
       }
     }
   }
@@ -761,8 +837,7 @@ async function handleVLESS(env, storedData = null, ctx = null, request = null) {
         try {
           await env.DB.prepare("UPDATE users SET used_gb = used_gb + ? WHERE username = ?").bind(deltaGb, username).run();
         } catch (e) {
-          let recovered = GLOBAL_TRAFFIC_CACHE.get(username) || 0;
-          GLOBAL_TRAFFIC_CACHE.set(username, recovered + bytesToCommit);
+          console.error("DB Write Error in addBytes:", e.message);
         }
       };
 
@@ -823,8 +898,7 @@ async function handleVLESS(env, storedData = null, ctx = null, request = null) {
           try {
             await env.DB.prepare("UPDATE users SET used_gb = used_gb + ? WHERE username = ?").bind(deltaGb, uname).run();
           } catch (e) {
-            let recovered = GLOBAL_TRAFFIC_CACHE.get(uname) || 0;
-            GLOBAL_TRAFFIC_CACHE.set(uname, recovered + cachedBytes);
+            console.error("DB Write Error in setOffline:", e.message);
           }
         };
         
@@ -2069,35 +2143,36 @@ body { width: 35em; margin: 0 auto; font-family: Tahoma, Verdana, Arial, sans-se
 <body class="bg-gray-50 text-gray-900 dark:bg-amoled-bg dark:text-zinc-100 min-h-screen transition-colors duration-200">
 
     <header class="sticky top-4 z-40 mx-4 md:mx-auto max-w-6xl my-4 rounded-full bg-white/70 dark:bg-zinc-950/65 backdrop-blur-md border border-gray-250/50 dark:border-zinc-800/80 shadow-lg px-4 md:px-6 py-2.5 transition-all duration-300">
-        <div class="flex items-center justify-between w-full gap-4">
-            <div class="flex items-center gap-3">
-                <h1 class="text-base md:text-lg font-bold flex items-center gap-2" dir="ltr">
-                    <span>Zeus Panel</span>
-                    <span class="text-[10px] md:text-xs px-2 py-0.5 font-semibold bg-blue-100 text-blue-800 dark:bg-blue-900/30 dark:text-blue-400 rounded-full">v1.3.5</span>
-                </h1>
-                <div class="flex items-center gap-2 sm:gap-3 bg-gray-100/80 dark:bg-zinc-800/40 px-2.5 py-1 rounded-full border border-gray-200/55 dark:border-zinc-800/50 shadow-sm flex-shrink-0">
-                    <a href="https://github.com/AG-Morgan/Zeus-Panel" target="_blank" rel="noopener noreferrer" class="text-gray-700 dark:text-zinc-300 hover:text-black dark:hover:text-white transition-all transform hover:scale-125 duration-200 flex-shrink-0" title="گیت‌هاب">
-                        <svg class="w-[18px] h-[18px] flex-shrink-0" viewBox="0 0 24 24" fill="currentColor">
-                            <path fill-rule="evenodd" clip-rule="evenodd" d="M12 2C6.477 2 2 6.477 2 12c0 4.42 2.87 8.17 6.84 9.5.5.08.66-.23.66-.5v-1.69c-2.77.6-3.36-1.34-3.36-1.34-.46-1.16-1.11-1.47-1.11-1.47-.91-.62.07-.6.07-.6 1 .07 1.53 1.03 1.53 1.03.87 1.52 2.34 1.07 2.91.83.09-.65.35-1.09.63-1.34-2.22-.25-4.55-1.11-4.55-4.92 0-1.11.38-2 1.03-2.71-.1-.25-.45-1.29.1-2.64 0 0 .84-.27 2.75 1.02.79-.22 1.65-.33 2.5-.33.85 0 1.71.11 2.5.33 1.91-1.29 2.75-1.02 2.75-1.02.55 1.35.2 2.39.1 2.64.65.71 1.03 1.6 1.03 2.71 0 3.82-2.34 4.66-4.57 4.91.36.31.69.92.69 1.85V21c0 .27.16.59.67.5C19.14 20.16 22 16.42 22 12A10 10 0 0012 2z"/>
-                        </svg>
-                    </a>
-                    <span class="w-px h-3 bg-gray-300 dark:bg-zinc-700 flex-shrink-0"></span>
-                    <a href="https://t.me/ag_morgan" target="_blank" rel="noopener noreferrer" class="text-sky-500 hover:text-sky-600 dark:hover:text-sky-400 transition-all transform hover:scale-125 duration-200 flex-shrink-0" title="تلگرام">
-                        <svg class="w-[18px] h-[18px] flex-shrink-0" viewBox="0 0 24 24" fill="currentColor">
-                            <path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm4.64 6.8c-.15 1.58-.8 5.42-1.13 7.19-.14.75-.42 1-.68 1.03-.58.05-1.02-.38-1.58-.75-.88-.58-1.38-.94-2.23-1.5-.99-.65-.35-1.01.22-1.59.15-.15 2.71-2.48 2.76-2.69a.2.2 0 00-.05-.18c-.06-.05-.14-.03-.21-.02-.09.02-1.49.94-4.22 2.79-.4.27-.76.41-1.08.4-.36-.01-1.04-.2-1.55-.37-.63-.2-1.12-.31-1.08-.66.02-.18.27-.36.74-.55 2.92-1.27 4.86-2.11 5.83-2.51 2.78-1.16 3.35-1.36 3.73-1.37.08 0 .27.02.39.12.1.08.13.19.14.27-.01.06.01.24 0 .24z"/>
-                        </svg>
-                    </a>
-                </div>
+        <div class="flex items-center justify-between w-full gap-2 md:gap-4">
+            <!-- بخش ورژن و لینک‌های اجتماعی شیک با ابعاد بهینه و عدم تداخل -->
+            <div class="flex items-center gap-1.5 sm:gap-2 flex-shrink-0">
+                <a href="https://t.me/ag_morgan" target="_blank" rel="noopener noreferrer" class="flex items-center justify-center p-2 sm:p-2.5 bg-sky-50 dark:bg-sky-950/20 text-sky-500 hover:text-sky-600 dark:hover:text-sky-400 border border-sky-200/50 dark:border-sky-900/30 rounded-full transition-all transform hover:scale-110 shadow-sm flex-shrink-0" title="تلگرام">
+                    <svg class="w-5 h-5 flex-shrink-0" viewBox="0 0 24 24" fill="currentColor">
+                        <path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm4.64 6.8c-.15 1.58-.8 5.42-1.13 7.19-.14.75-.42 1-.68 1.03-.58.05-1.02-.38-1.58-.75-.88-.58-1.38-.94-2.23-1.5-.99-.65-.35-1.01.22-1.59.15-.15 2.71-2.48 2.76-2.69a.2.2 0 00-.05-.18c-.06-.05-.14-.03-.21-.02-.09.02-1.49.94-4.22 2.79-.4.27-.76.41-1.08.4-.36-.01-1.04-.2-1.55-.37-.63-.2-1.12-.31-1.08-.66.02-.18.27-.36.74-.55 2.92-1.27 4.86-2.11 5.83-2.51 2.78-1.16 3.35-1.36 3.73-1.37.08 0 .27.02.39.12.1.08.13.19.14.27-.01.06.01.24 0 .24z"/>
+                    </svg>
+                </a>
+                <a href="https://github.com/AG-Morgan/Zeus-Panel" target="_blank" rel="noopener noreferrer" class="text-[10px] sm:text-xs px-2.5 py-1.5 font-black bg-blue-100 text-blue-800 dark:bg-blue-900/30 dark:text-blue-400 rounded-full hover:bg-blue-200 dark:hover:bg-blue-900/50 border border-blue-200/50 dark:border-blue-850/40 transition-all flex-shrink-0 whitespace-nowrap shadow-sm hover:scale-105 transform duration-200" title="گیت‌هاب پروژه">
+                    v1.3.5
+                </a>
             </div>
-            <div class="flex items-center gap-1.5 md:gap-3">
-                <button id="theme-toggle" class="p-2 md:p-2.5 rounded-full bg-gray-100 dark:bg-zinc-900/60 border border-gray-200/50 dark:border-zinc-800/50 hover:bg-gray-200 dark:hover:bg-zinc-800 transition">
+
+            <!-- عنوان Zeus Panel به صورت کاملاً تراز شده در مرکز بدون کوچکترین تداخل -->
+            <div class="flex-1 flex justify-center items-center min-w-0 px-1">
+                <h1 class="text-sm sm:text-base md:text-lg font-black tracking-wider text-gray-900 dark:text-white whitespace-nowrap select-none" dir="ltr">
+                    Zeus Panel
+                </h1>
+            </div>
+
+            <!-- دکمه‌های ابزار با فاصله‌بندی و ابعاد بهینه متناسب با تاچ موبایل -->
+            <div class="flex items-center gap-1 sm:gap-1.5 md:gap-3 flex-shrink-0">
+                <button id="theme-toggle" class="p-1.5 sm:p-2 md:p-2.5 rounded-full bg-gray-100 dark:bg-zinc-900/60 border border-gray-200/50 dark:border-zinc-800/50 hover:bg-gray-200 dark:hover:bg-zinc-800 transition">
                     <svg id="sun-icon" class="w-5 h-5 hidden dark:block text-yellow-500" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 3v1m0 16v1m9-9h-1M4 12H3m15.364-6.364l-.707.707M6.343 17.657l-.707.707m12.728 0l-.707-.707M6.343 6.343l-.707-.707M14 12a2 2 0 11-4 0 2 2 0 014 0z"></path></svg>
                     <svg id="moon-icon" class="w-5 h-5 block dark:hidden text-gray-600" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M20.354 15.354A9 9 0 018.646 3.646 9.003 9.003 0 0012 21a9.003 9.003 0 008.354-5.646z"></path></svg>
                 </button>
-                <button onclick="toggleSettingsModal(true)" class="p-2 md:p-2.5 rounded-full bg-gray-100 dark:bg-zinc-900/60 border border-gray-200/50 dark:border-zinc-800/50 hover:bg-gray-200 dark:hover:bg-zinc-800 transition text-gray-600 dark:text-gray-300 shadow-sm" title="تنظیمات">
+                <button onclick="toggleSettingsModal(true)" class="p-1.5 sm:p-2 md:p-2.5 rounded-full bg-gray-100 dark:bg-zinc-900/60 border border-gray-200/50 dark:border-zinc-800/50 hover:bg-gray-200 dark:hover:bg-zinc-800 transition text-gray-600 dark:text-gray-300 shadow-sm" title="تنظیمات">
                     <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31(2.37-2.37.996.608 2.296.07 2.572-1.065z"></path><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"></path></svg>
                 </button>
-                <button onclick="openCreateModal()" class="flex items-center justify-center p-2 md:p-2.5 bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-700 hover:to-indigo-700 text-white rounded-full shadow-md hover:shadow-lg hover:scale-105 transition-all duration-300" title="کاربر جدید">
+                <button onclick="openCreateModal()" class="flex items-center justify-center p-1.5 sm:p-2 md:p-2.5 bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-700 hover:to-indigo-700 text-white rounded-full shadow-md hover:shadow-lg hover:scale-105 transition-all duration-300" title="کاربر جدید">
                     <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M12 4v16m8-8H4"></path></svg>
                 </button>
             </div>
@@ -2862,6 +2937,10 @@ body { width: 35em; margin: 0 auto; font-family: Tahoma, Verdana, Arial, sans-se
             
             try {
                 const res = await fetch('/api/users?t=' + Date.now());
+                if (res.status === 401) {
+                    window.location.reload();
+                    return;
+                }
                 if (!res.ok) throw new Error();
                 const data = await res.json();
                 renderUsersUI(data);
@@ -3329,7 +3408,7 @@ body { width: 35em; margin: 0 auto; font-family: Tahoma, Verdana, Arial, sans-se
                   const remark = remarkParts.join(' - ');
                   
                   const fragmentConfig = {
-                    "packets": "tlshello",
+                    "packets": isTlsPort ? "tlshello" : "1-3",
                     "length": frag.length || frag.len || window.globalFragLen || "10-20",
                     "interval": frag.interval || frag.int || window.globalFragInt || "1-2"
                   };
@@ -3533,6 +3612,11 @@ body { width: 35em; margin: 0 auto; font-family: Tahoma, Verdana, Arial, sans-se
                     fetch('/api/proxy-ip'),
                     fetch('/locations').catch(() => null)
                 ]);
+
+                if (statusRes && statusRes.status === 401) {
+                    window.location.reload();
+                    return;
+                }
 
                 let activeIata = cachedActiveIata;
                 if (statusRes && statusRes.ok) {
@@ -3773,11 +3857,28 @@ body { width: 35em; margin: 0 auto; font-family: Tahoma, Verdana, Arial, sans-se
             loadUsers();
             loadLocations();
             setInterval(() => loadUsers(true), 60000);
+
+            // بررسی خودکار وضعیت و به‌روزرسانی اطلاعات هنگام برگشتن به تب مرورگر
+            document.addEventListener('visibilitychange', () => {
+                if (document.visibilityState === 'visible') {
+                    loadUsers(true);
+                    loadLocations();
+                }
+            });
+            window.addEventListener('focus', () => {
+                loadUsers(true);
+            });
             
             // به‌روزرسانی مداوم تنظیمات و فرگمنت‌ها در پس‌زمینه بدون نیاز به رفرش
             setInterval(() => {
                 fetch('/api/proxy-ip')
-                    .then(res => res.ok ? res.json() : null)
+                    .then(res => {
+                        if (res.status === 401) {
+                            window.location.reload();
+                            return null;
+                        }
+                        return res.ok ? res.json() : null;
+                    })
                     .then(statusData => {
                         if (statusData) {
                             if (statusData.fragments_list && Array.isArray(statusData.fragments_list) && statusData.fragments_list.length > 0) {
