@@ -2073,7 +2073,7 @@ body { width: 35em; margin: 0 auto; font-family: Tahoma, Verdana, Arial, sans-se
             <div class="flex items-center gap-3">
                 <h1 class="text-base md:text-lg font-bold flex items-center gap-2" dir="ltr">
                     <span>Zeus Panel</span>
-                    <span class="text-[10px] md:text-xs px-2 py-0.5 font-semibold bg-blue-100 text-blue-800 dark:bg-blue-900/30 dark:text-blue-400 rounded-full">v1.3</span>
+                    <span class="text-[10px] md:text-xs px-2 py-0.5 font-semibold bg-blue-100 text-blue-800 dark:bg-blue-900/30 dark:text-blue-400 rounded-full">v1.3.5</span>
                 </h1>
                 <div class="flex items-center gap-2 sm:gap-3 bg-gray-100/80 dark:bg-zinc-800/40 px-2.5 py-1 rounded-full border border-gray-200/55 dark:border-zinc-800/50 shadow-sm flex-shrink-0">
                     <a href="https://github.com/AG-Morgan/Zeus-Panel" target="_blank" rel="noopener noreferrer" class="text-gray-700 dark:text-zinc-300 hover:text-black dark:hover:text-white transition-all transform hover:scale-125 duration-200 flex-shrink-0" title="گیت‌هاب">
